@@ -1,4 +1,6 @@
 wireless/
+data/sionna_shards/
+*.pt
 *.pth
 *.dylib
 *.so

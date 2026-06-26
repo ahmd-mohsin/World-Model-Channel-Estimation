@@ -106,6 +106,9 @@ All dimensions live in a single config so blocks compose without shape surprises
    (15/15 tests pass; EMA tracks only trainable head, frozen LWM skipped).
 3. **M2 — SelectionNet + SelectiveSSM.** Recurrence is numerically stable; gradients
    reach SelectionNet. Sanity: a fixed `A,B,C` matches a hand-checked linear recurrence.
+   **SelectionNet DONE** — `a_t → A,B,C,Δ` with Mamba/S4-style init (stable A<0, positive Δ
+   log-uniform in [dt_min,dt_max], HiPPO-spread timescales); 10 tests, GPU-validated (36 total pass).
+   SelectiveSSM still pending.
 4. **M3 — Predictor + JEPA loss.** Full forward; loss decreases on a toy synthetic
    sequence (e.g. AR(1) channel).
 5. **M4 — Trainer + data.** Synthetic channel generator (Jakes/AR Rayleigh) → training

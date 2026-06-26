@@ -74,6 +74,30 @@ class ContextEncoder(nn.Module):
 - `trainable_parameters()` yields exactly the non-frozen params — what the optimizer and the
   EMA target encoder operate on.
 
+## Head SSL pretraining (making the head non-random)
+
+The projection head starts randomly initialized. A random *linear* projection already preserves
+the (excellent) frozen-LWM features, so on **clean** channels a random head classifies location
+near-perfectly — but it has no reason to be robust to noise. We pretrain the head (LWM frozen,
+~99K params) with a **VICReg** objective whose positive pairs are **two noise-augmented views of
+the same channel** — i.e. enforce noise-invariance, the prior behind channel estimation.
+
+- Data: **2048 Sionna sequences** generated in parallel across all 8 A100s
+  (`scripts/run-parallel-pretrain.sh` → `gen_sionna_shard.py` per GPU, ~1 min total).
+- Train: `pretrain_head.py` (AdamW + cosine, 4000 steps). Loss 22.6 → 12.3; variance term
+  0.90 → 0.29 (no collapse). Curve: `checkpoints/06_pretrain_loss.png`. Head:
+  `checkpoints/head_vicreg.pt`.
+- Verify: `probe_head.py` (linear probe, 6 location clusters):
+
+  | probe | random head | trained head | Δ |
+  | ----- | ----------- | ------------ | - |
+  | clean location acc | 0.967 | 0.906 | −0.061 |
+  | **noise-robust (train clean, test @10 dB)** | 0.517 | **0.911** | **+0.394** |
+
+  The trained head is far more **noise-robust** (+0.39 absolute), exactly what the objective
+  targets, at a small cost on the already-saturated clean metric. So the head is now genuinely
+  task-tuned, not random. (For the full pipeline it can be further refined end-to-end by JEPA.)
+
 ## Tests (M1) — 9 passing
 
 - Output shape `(B, T, embed_dim)` across `lwm` / `ijepa` / `stub` backbones.

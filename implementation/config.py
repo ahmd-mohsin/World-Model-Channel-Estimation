@@ -26,6 +26,11 @@ class SSWMConfig:
     state_dim: int = 64              # SSM hidden state size (diagonal)
     latent_dim: int = 256            # SSM output latent (kept == embed_dim by default)
 
+    # ---- SelectionNet (input-dependent SSM params A,B,C,Δ from actions) ----
+    selection_hidden: int = 128      # hidden width of the SelectionNet trunk
+    dt_min: float = 1e-3             # Δ init range lower bound (log-uniform)
+    dt_max: float = 1e-1             # Δ init range upper bound (log-uniform)
+
     # ---- pretrained encoder backbone ----
     # "lwm"   : Large Wireless Model — DeepMIMO-pretrained, domain-native (RECOMMENDED).
     # "ijepa" : Meta I-JEPA ViT — image-domain transfer via a channel->image adapter.
