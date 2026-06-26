@@ -21,16 +21,18 @@ OUT.mkdir(exist_ok=True)
 
 
 def main():
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
     cfg = SSWMConfig(n_subcarriers=32, n_antennas=32, seq_len=4, horizon_k=2,
                      embed_dim=256, backbone="lwm", use_pretrained=True,
                      ema_momentum=0.99)
-    ctx = ContextEncoder(cfg)
-    tgt = TargetEncoder(ctx, cfg)
+    ctx = ContextEncoder(cfg).to(dev)
+    tgt = TargetEncoder(ctx, cfg).to(dev)
     ctx.train()
 
     print("=" * 68)
     print("Context <-> Target coordination (JEPA self-distillation)")
     print("=" * 68)
+    print(f"device                      : {dev}")
     print(f"backbone pretrained         : {ctx.backbone.is_pretrained}")
     print(f"online trainable params     : {sum(p.numel() for p in ctx.trainable_parameters()):,}")
     print(f"target trainable params     : {sum(p.numel() for p in tgt.parameters() if p.requires_grad):,} (must be 0)")
@@ -38,8 +40,8 @@ def main():
     print(f"ema momentum                : {cfg.ema_momentum}")
 
     torch.manual_seed(0)
-    o = torch.randn(16, cfg.seq_len, 2, 32, 32)
-    proxy = torch.randn(16, cfg.seq_len, cfg.embed_dim)
+    o = torch.randn(16, cfg.seq_len, 2, 32, 32, device=dev)
+    proxy = torch.randn(16, cfg.seq_len, cfg.embed_dim, device=dev)
     opt = torch.optim.Adam(ctx.trainable_parameters(), lr=5e-3)
 
     losses, online_var, ema_gap = [], [], []

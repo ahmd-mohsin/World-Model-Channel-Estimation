@@ -35,14 +35,14 @@ case "$DIRECTION" in
   up)
     echo ">> Pushing $LOCAL_PROJECT_DIR/ -> $SSH_USER@remote:$REMOTE_PROJECT_DIR/"
     $SSH_CMD "$SSH_USER@localhost" "mkdir -p '$REMOTE_PROJECT_DIR'"
-    rsync -avz --progress "${EXCLUDES[@]}" "${EXTRA_ARGS[@]}" \
+    rsync -avz --progress "${EXCLUDES[@]}" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
       -e "$SSH_CMD" \
       "$LOCAL_PROJECT_DIR/" \
       "$SSH_USER@localhost:$REMOTE_PROJECT_DIR/"
     ;;
   down)
     echo ">> Pulling $SSH_USER@remote:$REMOTE_PROJECT_DIR/ -> $LOCAL_PROJECT_DIR/"
-    rsync -avz --progress "${EXCLUDES[@]}" "${EXTRA_ARGS[@]}" \
+    rsync -avz --progress "${EXCLUDES[@]}" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
       -e "$SSH_CMD" \
       "$SSH_USER@localhost:$REMOTE_PROJECT_DIR/" \
       "$LOCAL_PROJECT_DIR/"
