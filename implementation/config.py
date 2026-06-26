@@ -66,6 +66,12 @@ class SSWMConfig:
     # is opt-in rather than a forced default.
     head_checkpoint: str | None = None
 
+    # ---- predictor ----
+    # Predict the future embedding as present_embedding + learned_residual, so persistence
+    # (residual=0) is the prior. Without this, predicting ẑ from scratch loses to persistence
+    # on slowly-varying channels (measured: NMSE 0.99 vs 0.14 across multi-scene data).
+    residual_prediction: bool = True
+
     # ---- EMA target encoder ----
     ema_momentum: float = 0.996
 

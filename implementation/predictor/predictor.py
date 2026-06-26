@@ -32,6 +32,14 @@ class Predictor(nn.Module):
         self.D = nn.Parameter(torch.ones(d))
         self.norm = nn.LayerNorm(d)
         self.out_proj = nn.Linear(d, config.embed_dim)
+        # Residual-prediction friendliness: zero-init the output so the predictor starts at
+        # exactly the persistence prior (delta = 0) and learns small corrections. Without
+        # this (and with a LayerNorm forcing fixed output scale) the predictor cannot emit
+        # the near-zero residual that slowly-varying channels require, and never converges.
+        if config.residual_prediction:
+            nn.init.zeros_(self.out_proj.weight)
+            nn.init.zeros_(self.out_proj.bias)
+        self._use_out_norm = not config.residual_prediction
 
     def forward(self, z_t: torch.Tensor, planned_acts: torch.Tensor) -> torch.Tensor:
         if planned_acts.dim() != 3:
@@ -39,7 +47,7 @@ class Predictor(nn.Module):
         b, k, _ = planned_acts.shape
         h = self.z_to_state(z_t)
         if k == 0:
-            return self.out_proj(self.norm(h))
+            return self.out_proj(self.norm(h) if self._use_out_norm else h)
         for j in range(k):
             a_j = planned_acts[:, j]
             A, B, C, dt = self.selection(a_j)
@@ -47,7 +55,7 @@ class Predictor(nn.Module):
             dA, dB = discretize(A, B, dt)
             h = dA * h + dB * u
             y = C * h + self.D * u
-        return self.out_proj(self.norm(y))
+        return self.out_proj(self.norm(y) if self._use_out_norm else y)
 
     def rollout(self, z_t: torch.Tensor, planned_acts: torch.Tensor) -> torch.Tensor:
         """Return predictions at every horizon 1..k as (B, k, embed_dim)."""
@@ -61,5 +69,5 @@ class Predictor(nn.Module):
             dA, dB = discretize(A, B, dt)
             h = dA * h + dB * u
             y = C * h + self.D * u
-            outs.append(self.out_proj(self.norm(y)))
+            outs.append(self.out_proj(self.norm(y) if self._use_out_norm else y))
         return torch.stack(outs, dim=1)

@@ -62,11 +62,21 @@ class SSWM(nn.Module):
         z = self.encode_sequence(o, a)                       # (B,T,latent)
         z_t = z[:, anchor]                                   # (B,latent)
         planned = a[:, anchor:anchor + k]                    # (B,k,action_dim)
-        z_hat = self.predictor(z_t, planned)                 # (B,embed_dim)
+        delta = self.predictor(z_t, planned)                 # (B,embed_dim)
 
         # Target: future observation through the EMA encoder (stop-grad), embed_dim space.
         o_future = o[:, anchor + k]                          # (B,2,Nant,Nsub)
         z_tilde = self.target_encoder(o_future.unsqueeze(1))[:, 0]  # (B,embed_dim), detached
+
+        # Residual prediction: the predictor learns the CHANGE from the present embedding,
+        # so persistence (delta=0) is the built-in prior. The present embedding is taken
+        # from the (stop-grad) target encoder so the prior is on the same scale as z_tilde.
+        if self.config.residual_prediction:
+            with torch.no_grad():
+                z_present = self.target_encoder(o[:, anchor].unsqueeze(1))[:, 0]
+            z_hat = z_present + delta
+        else:
+            z_hat = delta
 
         if z_hat.shape != z_tilde.shape:
             raise RuntimeError(f"predictor/target shape mismatch: {z_hat.shape} vs {z_tilde.shape}")
