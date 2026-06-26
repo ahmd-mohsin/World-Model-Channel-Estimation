@@ -1,40 +1,56 @@
-# 1. ContextEncoder  (pre-trained I-JEPA backbone)
+# 1. ContextEncoder  (pluggable pre-trained backbone)
 
 `o_t  ->  x_t`
 
-The **online encoder**. Maps a current observation (a channel measurement) into the latent
-embedding `x_t` that feeds the selective SSM. Built around a **frozen pre-trained I-JEPA
-ViT-H/14**; only a small input adapter and projection head are trained.
+The **online encoder**. Maps a channel measurement into the latent embedding `x_t` that
+feeds the selective SSM. It is **backbone-agnostic**: a pluggable pretrained encoder turns
+each channel snapshot into patch tokens, which we pool and project to the pipeline-wide
+`embed_dim`. Only the projection head (and any trainable adapter inside the backbone) is
+trained; pretrained weights stay frozen.
 
-## Why I-JEPA (research summary)
+## Which pretrained encoder? (research summary)
 
-We surveyed Meta's public JEPA checkpoints on HuggingFace `transformers`:
+We compared general-vision JEPA models against **domain-native wireless foundation models**:
 
-| Model        | Checkpoint                       | Domain | Hidden | Input             | Predictor |
-| ------------ | -------------------------------- | ------ | ------ | ----------------- | --------- |
-| **I-JEPA**   | `facebook/ijepa_vith14_1k`       | images | 1280   | `(B,3,224,224)`   | no (enc)  |
-| I-JEPA (big) | `facebook/ijepa_vitg16_22k`      | images | 1408   | `(B,3,224,224)`   | no (enc)  |
-| **V-JEPA 2** | `facebook/vjepa2-vitl-fpc64-256` | video  | 1024   | `(B,T,3,256,256)` | yes (+AC) |
+| Backbone        | Checkpoint                  | Pretrained on        | Input it ingests        | Hidden | Verdict                          |
+| --------------- | --------------------------- | -------------------- | ----------------------- | ------ | -------------------------------- |
+| **LWM** (default) | `wi-lab/lwm-v1.1`         | **DeepMIMO channels**| channel matrices direct | 128    | **Domain-native — best fit**     |
+| LWM 1.0         | `wi-lab/lwm`                | DeepMIMO + Sionna    | 32×32 channel           | 64     | Simpler fallback                 |
+| I-JEPA          | `facebook/ijepa_vith14_1k`  | ImageNet (photos)    | 3×224×224 image         | 1280   | Transfer via channel→image adapter |
+| V-JEPA 2        | `facebook/vjepa2-vitl-...`  | internet video       | video clips             | 1024   | Upgrade path (has own predictor) |
 
-**Decision:** baseline uses **I-JEPA ViT-H/14**, **frozen**. It is precisely the "encoder"
-role in `sswm_fig.pdf`; our own `SelectiveSSM` + `Predictor` provide the temporal and
-action-conditioned world-model dynamics (the novel part). V-JEPA 2 is the documented
-upgrade path — it is a native video world model whose `-AC` variant already has an
-action-conditioned predictor that could later replace ours.
+**Decision:** default to **LWM** — it is pretrained on **DeepMIMO**, the same data domain as
+channel estimation, and ingests channel matrices *directly* (no image hack). It is the only
+wireless foundation model with **publicly downloadable weights** and a documented
+embedding-extraction API. I-JEPA is kept as an image-transfer option (it needs a trainable
+channel→image conv stem); the stub keeps everything testable offline. **License note:** LWM's
+HF repo declares no license — resolve before any redistribution.
 
-## Domain bridge: channel data -> ViT image space
+> **Real LWM is wired in.** The `wi-lab/lwm-v1.1` source (`lwm_model.py`, `inference.py`,
+> `input_preprocess.py`, `utils.py`) is vendored under `lwm/`. `LWMBackbone` reproduces the
+> v1.1 tokenization (interleave real/imag → 4×4 patches → length-32 tokens → prepend `[CLS]`)
+> and loads `models/model.pth`, stripping the `module.` `DataParallel` prefix. The weights
+> (~10 MB) are gitignored; if absent they auto-download via `huggingface_hub`. If anything is
+> unavailable offline, it falls back to the stub so the module stays importable.
+>
+> **Setup:** create the env and deps with `python3 -m venv wireless && source wireless/bin/activate
+> && pip install torch numpy transformers huggingface_hub pytest`.
 
-A channel snapshot `H_t ∈ C^{N_sub × N_ant}` is image-like (subcarrier × antenna, or
-delay × Doppler grid). We bridge it to the ViT's expected `(3, 224, 224)` input:
+## Architecture
 
 ```
-H_t (complex)
-  → stack real/imag                 → (2, N_sub, N_ant)
-  → ChannelAdapter (conv stem)      → (3, 224, 224)        [TRAINABLE]
-  → frozen I-JEPA ViT-H/14          → (256 tokens, 1280)   [FROZEN]
-  → mean-pool over tokens           → (1280,)
-  → projection head (MLP)           → x_t (embed_dim)       [TRAINABLE]
+channel (B,T,2,Nsub,Nant)
+  → [fold time into batch]                                  (B*T, 2, Nsub, Nant)
+  → backbone  (LWM / I-JEPA+adapter / stub)  → tokens       (B*T, P, hidden)   [frozen]
+  → mean-pool over tokens                                   (B*T, hidden)
+  → ProjectionHead (LN→Linear→GELU→Linear)   → x_t          (B*T, embed_dim)   [trainable]
+  → [unfold time]                                           (B, T, embed_dim)
 ```
+
+Backbones live in `backbones.py` behind a uniform contract
+`forward(channel) -> tokens (N, P, hidden)` and a `frozen_modules()` hook, so swapping
+backbones never changes the rest of the pipeline. Selected via `SSWMConfig.backbone`
+(`"lwm" | "ijepa" | "stub"`); `use_pretrained=False` forces the stub.
 
 ## Interface
 
@@ -46,24 +62,43 @@ H_t (complex)
 ```python
 class ContextEncoder(nn.Module):
     def forward(self, o: Tensor) -> Tensor:   # (B,T,2,Nsub,Nant) -> (B,T,embed_dim)
-    def trainable_parameters(self): ...        # adapter + head only (for EMA + optim)
+    def trainable_parameters(self): ...        # everything except frozen pretrained weights
 ```
 
-## Baseline design
+## Freezing semantics
 
-- **Backbone**: `IJepaModel.from_pretrained("facebook/ijepa_vith14_1k")`, `requires_grad_(False)`,
-  `.eval()`. Loaded lazily.
-- **Offline fallback**: if `transformers`/weights are unavailable, a small random ViT-shaped
-  stub with the same 1280-d output is used so the module stays importable and testable.
-  Controlled by `SSWMConfig.use_pretrained`.
-- **ChannelAdapter**: conv stem `2→3` channels + bilinear resize to 224×224. Trainable.
-- **Projection head**: LayerNorm → Linear(1280→embed_dim) → GELU → Linear. Trainable.
-- **Time handling**: encoder is per-timestep; we fold `(B,T)` into the batch, run the ViT
-  once, then unfold. SSM does the temporal mixing downstream.
+- Pretrained sub-modules a backbone declares via `frozen_modules()` are set `requires_grad=False`
+  and `.eval()`. For I-JEPA only the ViT is frozen; its channel→image adapter stays trainable.
+- We deliberately do **not** wrap the backbone forward in `no_grad`: gradients must flow
+  *through* the frozen ViT activations to the trainable adapter below it.
+- `trainable_parameters()` yields exactly the non-frozen params — what the optimizer and the
+  EMA target encoder operate on.
 
-## Test (M1)
+## Tests (M1) — 9 passing
 
-- Output shape == `(B, T, embed_dim)`.
-- Backbone params have `requires_grad == False`; adapter+head params have `requires_grad == True`.
-- `trainable_parameters()` excludes the backbone (so EMA/optimizer only touch adapter+head).
-- Runs in fallback (stub) mode with no network access.
+- Output shape `(B, T, embed_dim)` across `lwm` / `ijepa` / `stub` backbones.
+- Variable channel grid sizes accepted with no code change.
+- Head trainable; gradients flow to it.
+- Real LWM loads + freezes; `trainable_parameters()` excludes frozen LWM weights.
+- LWM tokenization shape = `(N, n_patches + 1 CLS, 32)`.
+- Gradients reach the head, never the frozen LWM.
+
+```
+pytest implementation/context_encoder/test_context_encoder.py -q   # 9 passed
+```
+
+## Demo — verified output
+
+`python implementation/context_encoder/demo_encoder.py` runs the encoder on a synthetic
+multipath MIMO-OFDM channel and shows the real `o_t → x_t` mapping:
+
+```
+observations o_t   : (2, 8, 2, 32, 32)   (B, T, [real/imag], N_ant, N_sub)
+embedding x_t      : (2, 8, 256)         (B, T, embed_dim)  --> feeds the SSM block
+trainable params   : 99,072 / 2,569,376  (rest = frozen LWM)
+pretrained loaded  : True
+```
+
+Sanity on the pretrained LWM channel embeddings: small perturbations stay close
+(RMS 0.0005) while distinct channels separate ~16×, confirming the frozen DeepMIMO
+representation is meaningful before any task training.

@@ -26,12 +26,34 @@ class SSWMConfig:
     state_dim: int = 64              # SSM hidden state size (diagonal)
     latent_dim: int = 256            # SSM output latent (kept == embed_dim by default)
 
-    # ---- pretrained I-JEPA backbone ----
-    use_pretrained: bool = True              # False -> offline random ViT stub
+    # ---- pretrained encoder backbone ----
+    # "lwm"   : Large Wireless Model — DeepMIMO-pretrained, domain-native (RECOMMENDED).
+    # "ijepa" : Meta I-JEPA ViT — image-domain transfer via a channel->image adapter.
+    # "stub"  : offline random encoder, same output contract (for tests / no network).
+    backbone: str = "lwm"
+    use_pretrained: bool = True              # False -> force stub regardless of `backbone`
+    freeze_backbone: bool = True
+
+    # LWM (wireless) backbone
+    lwm_checkpoint: str = "model.pth"
+    lwm_hidden: int = 128                    # v1.1 D_MODEL (v1.0 = 64)
+    lwm_patch_rows: int = 4
+    lwm_patch_cols: int = 4
+    lwm_element_length: int = 32             # patch_rows * patch_cols * 2
+
+    # I-JEPA (image) backbone
     jepa_checkpoint: str = "facebook/ijepa_vith14_1k"
     jepa_hidden: int = 1280                  # ViT-H/14 hidden size
     jepa_image_size: int = 224               # backbone expected H == W
-    freeze_backbone: bool = True
+
+    @property
+    def backbone_hidden(self) -> int:
+        """Token/feature width emitted by the selected backbone."""
+        return {
+            "lwm": self.lwm_hidden,
+            "ijepa": self.jepa_hidden,
+            "stub": self.lwm_hidden,
+        }[self.backbone]
 
     # ---- EMA target encoder ----
     ema_momentum: float = 0.996

@@ -8,14 +8,19 @@ temporal backbone is a **selective state-space model (SSM, Mamba-like)**. We lea
 predict *future latent representations* from past observations and actions, entirely in
 representation space (no raw-signal reconstruction).
 
-> **Baseline backbone decision (researched).** The context/target encoders are built
-> around a **frozen pre-trained I-JEPA ViT-H/14** (`facebook/ijepa_vith14_1k`,
-> hidden dim **1280**, 224×224 input, 256 patch tokens). I-JEPA is Meta's image
-> Joint-Embedding Predictive Architecture — exactly the "encoder" role in the figure.
-> We keep the ViT **frozen** and train only a small **channel adapter** (maps complex
-> channel tensors into the ViT's 3×224×224 image space) plus a **projection head**.
-> The EMA target encoder is an EMA of the *trainable* parts only.
-> See `context_encoder/README.md` for the full rationale and the V-JEPA 2 upgrade path.
+> **Baseline backbone decision (researched).** The context/target encoders are
+> **backbone-agnostic** with a pluggable registry (`SSWMConfig.backbone`):
+> - **`lwm` (default)** — **Large Wireless Model** (`wi-lab/lwm-v1.1`), a foundation model
+>   **pretrained on DeepMIMO channels**, hidden dim **128**. Domain-native: ingests channel
+>   matrices directly. Best fit for channel estimation.
+> - **`ijepa`** — Meta I-JEPA ViT-H/14 (`facebook/ijepa_vith14_1k`, hidden **1280**),
+>   image-domain transfer via a trainable channel→image conv stem.
+> - **`stub`** — offline random encoder with the same output contract (tests / no network).
+>
+> The pretrained backbone is **frozen**; we train only a small adapter (if any) + a
+> **projection head**, and the EMA target encoder is an EMA of those trainable parts.
+> See `context_encoder/README.md` for the comparison table, license caveat, and the
+> V-JEPA 2 upgrade path. **Status: ContextEncoder implemented & tested (8/8 passing).**
 
 For channel estimation, the mapping is:
 
