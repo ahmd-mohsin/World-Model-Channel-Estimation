@@ -102,7 +102,8 @@ All dimensions live in a single config so blocks compose without shape surprises
 1. **M0 — Skeleton & config.** Shape contracts + dummy tensors flow end-to-end.
    `pytest` checks every module's output shape.
 2. **M1 — Encoders + EMA.** Context/target encoders, EMA update, stop-grad verified
-   (target grads are `None`).
+   (target grads are `None`). **DONE** — ContextEncoder + TargetEncoder built & tested
+   (15/15 tests pass; EMA tracks only trainable head, frozen LWM skipped).
 3. **M2 — SelectionNet + SelectiveSSM.** Recurrence is numerically stable; gradients
    reach SelectionNet. Sanity: a fixed `A,B,C` matches a hand-checked linear recurrence.
 4. **M3 — Predictor + JEPA loss.** Full forward; loss decreases on a toy synthetic

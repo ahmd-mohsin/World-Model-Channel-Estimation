@@ -92,3 +92,28 @@ def test_lwm_gradients_reach_head_not_backbone():
     out.pow(2).mean().backward()
     assert any(p.grad is not None for p in enc.head.parameters())
     assert all(p.grad is None for m in enc.backbone.frozen_modules() for p in m.parameters())
+
+
+def test_train_mode_keeps_frozen_backbone_deterministic():
+    cfg = _cfg(backbone="lwm", use_pretrained=True)
+    enc = ContextEncoder(cfg)
+    if not enc.backbone.is_pretrained:
+        pytest.skip("LWM weights unavailable offline")
+    enc.train()
+    assert enc.head.training is True
+    for m in enc.backbone.frozen_modules():
+        assert all(not sub.training for sub in m.modules())
+    o = _obs(cfg, b=2)
+    assert torch.allclose(enc(o), enc(o))
+
+
+def test_trainable_parameters_robust_to_deepcopy():
+    import copy
+
+    cfg = _cfg(backbone="lwm", use_pretrained=True)
+    enc = ContextEncoder(cfg)
+    clone = copy.deepcopy(enc)
+    n_src = sum(p.numel() for p in enc.trainable_parameters())
+    n_clone = sum(p.numel() for p in clone.trainable_parameters())
+    assert n_src == n_clone
+    assert n_clone < sum(p.numel() for p in clone.parameters())

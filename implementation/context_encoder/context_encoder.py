@@ -32,25 +32,30 @@ class ContextEncoder(nn.Module):
         self.backbone = build_backbone(config)
         self.head = ProjectionHead(self.backbone.hidden, config.embed_dim)
 
-        self._frozen_param_ids: set[int] = set()
         if config.freeze_backbone:
             self._freeze_pretrained()
 
+    def _frozen_modules(self):
+        if hasattr(self.backbone, "frozen_modules"):
+            return list(self.backbone.frozen_modules())
+        return [self.backbone]
+
     def _freeze_pretrained(self) -> None:
-        frozen = (
-            self.backbone.frozen_modules()
-            if hasattr(self.backbone, "frozen_modules")
-            else [self.backbone]
-        )
-        for module in frozen:
+        for module in self._frozen_modules():
             module.eval()
             for p in module.parameters():
                 p.requires_grad_(False)
-                self._frozen_param_ids.add(id(p))
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.config.freeze_backbone:
+            for module in self._frozen_modules():
+                module.eval()
+        return self
 
     def trainable_parameters(self):
         for p in self.parameters():
-            if id(p) not in self._frozen_param_ids:
+            if p.requires_grad:
                 yield p
 
     def forward(self, o: torch.Tensor) -> torch.Tensor:
