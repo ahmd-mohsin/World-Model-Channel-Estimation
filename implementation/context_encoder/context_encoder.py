@@ -35,6 +35,18 @@ class ContextEncoder(nn.Module):
         if config.freeze_backbone:
             self._freeze_pretrained()
 
+        self._maybe_load_head()
+
+    def _maybe_load_head(self) -> None:
+        import os
+
+        ckpt = self.config.head_checkpoint
+        if not ckpt or not os.path.exists(ckpt):
+            return
+        state = torch.load(ckpt, map_location="cpu")
+        self.head.load_state_dict(state["head"] if "head" in state else state)
+        print(f"[ContextEncoder] loaded SSL-pretrained head from {ckpt}")
+
     def _frozen_modules(self):
         if hasattr(self.backbone, "frozen_modules"):
             return list(self.backbone.frozen_modules())

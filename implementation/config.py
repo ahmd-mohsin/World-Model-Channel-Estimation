@@ -60,6 +60,12 @@ class SSWMConfig:
             "stub": self.lwm_hidden,
         }[self.backbone]
 
+    # ---- pretrained projection head (optional, from head SSL pretraining) ----
+    # If set and the file exists, ContextEncoder loads these head weights at init.
+    # None or missing file -> random head (graceful). Checkpoint is gitignored, so this
+    # is opt-in rather than a forced default.
+    head_checkpoint: str | None = None
+
     # ---- EMA target encoder ----
     ema_momentum: float = 0.996
 

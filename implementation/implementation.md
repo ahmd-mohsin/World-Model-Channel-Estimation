@@ -107,8 +107,11 @@ All dimensions live in a single config so blocks compose without shape surprises
 3. **M2 — SelectionNet + SelectiveSSM.** Recurrence is numerically stable; gradients
    reach SelectionNet. Sanity: a fixed `A,B,C` matches a hand-checked linear recurrence.
    **SelectionNet DONE** — `a_t → A,B,C,Δ` with Mamba/S4-style init (stable A<0, positive Δ
-   log-uniform in [dt_min,dt_max], HiPPO-spread timescales); 10 tests, GPU-validated (36 total pass).
-   SelectiveSSM still pending.
+   log-uniform in [dt_min,dt_max], HiPPO-spread timescales); 10 tests.
+   **SelectiveSSM DONE** — diagonal ZOH selective scan; `forward`==`step()` rollout, matches
+   reference recurrence, stable to T=200, causal; 8 tests. Pipeline o→x→z verified.
+   **M2 COMPLETE.** All modules GPU-validated (49/50 pass; the 1 "fail" is the forced-CUDA test
+   harness colliding with Sionna CPU tensors — that test passes in a normal run).
 4. **M3 — Predictor + JEPA loss.** Full forward; loss decreases on a toy synthetic
    sequence (e.g. AR(1) channel).
 5. **M4 — Trainer + data.** Synthetic channel generator (Jakes/AR Rayleigh) → training
