@@ -1,0 +1,213 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{parskip}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{subcaption}
+\usepackage{titlesec}
+\usepackage{multirow}
+\usepackage{colortbl}
+
+% \setlength{\tabcolsep}{10pt}
+\renewcommand{\arraystretch}{1.15}
+
+\definecolor{stanfordred}{HTML}{8C1515}
+\definecolor{superlightgray}{RGB}{225, 225, 225}
+\definecolor{lightblue}{RGB}{230, 240, 250}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=stanfordred,
+    filecolor=magenta,      
+    urlcolor=blue,
+    citecolor=stanfordred,
+}
+
+\geometry{left=0.5in,right=0.5in,
+          top=0.5in,bottom=0.5in}
+
+\parindent=0pt
+\parskip=4pt
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0pt}
+% \fancyfoot[C]{\thepage}
+
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{stanfordred}}
+  {\thesection}
+  {1em}
+  {}
+\titlespacing*{\section}{0pt}{2.5ex plus 1ex minus .2ex}{1.5ex plus .2ex}
+
+\titleformat{\subsection}
+  {\normalfont\large\bfseries}
+  {\thesubsection}
+  {1em}
+  {}
+\titlespacing*{\subsection}{0pt}{2ex plus 1ex minus .2ex}{1ex plus .2ex}
+
+\setlength{\textfloatsep}{8pt plus 1.0pt minus 2.0pt}
+\setlength{\intextsep}{8pt plus 1.0pt minus 2.0pt}
+
+\setlist[itemize]{noitemsep, topsep=2pt, leftmargin=*}
+\setlist[enumerate]{noitemsep, topsep=2pt, leftmargin=*}
+
+\begin{document}
+
+{\hfill
+\raggedleft
+\includegraphics[height=1.9cm]{qual_stan.png}}
+
+\begin{center}
+ {\parbox{0.85\textwidth}{\centering\Large\textbf{State-Space World Foundation Models for Intelligent RAN}}}\\[0.3cm]
+\end{center}
+
+\begin{center}
+\textbf{Applicants:} Muhammad Ahmed Mohsin, Muhammad Umer\\
+\textbf{Recommender:} Prof. John M. Cioffi (cioffi@stanford.edu)\\
+Department of Electrical Engineering, Stanford University, USA
+\end{center}
+
+\vspace{0.5em}
+
+\begin{abstract}
+Next-generation wireless networks require anticipatory intelligence to manage rapidly evolving channel conditions that outpace reactive control loops. We propose \textbf{state-space world models (SSWMs)} that combine selective state-space models (SSMs) with joint-embedding predictive architectures (JEPAs) to learn efficient latent representations of wireless dynamics. Unlike Transformer-based approaches with $O(T^2)$ complexity, SSWMs achieve linear $O(T)$ scaling through Mamba-style selective dynamics, enabling real-time multi-horizon prediction. The model learns to forecast future channel representations conditioned on network actions (beam configurations, scheduling, power control), supporting imagination-based planning for radio access network (RAN) optimization. By predicting in latent space rather than reconstructing raw channel state information, SSWMs capture multi-scale temporal dynamics while maintaining computational efficiency. This framework enables proactive beam tracking, resource allocation, and mobility management across diverse B5G/6G scenarios.
+\end{abstract}
+
+\textbf{\textcolor{stanfordred}{\large Introduction.}}
+
+Next-generation wireless networks demand a shift from reactive to \emph{anticipatory} intelligence; systems that predict environmental dynamics and act proactively. Current radio access network (RAN) optimization treats channel estimation, resource allocation, and mobility management as isolated tasks responding to instantaneous measurements. This paradigm fails in dynamic 6G scenarios where user mobility, interference, and channel conditions evolve faster than control loops can respond. Studies show that even a 4ms feedback delay at moderate speeds reduces sum-rate by ${\sim}50\%$ at 3.5 GHz~\cite{mohsin2025continual}, underscoring the need for predictive capabilities.
+
+\emph{World models} offer a principled solution: learned simulators that predict environment evolution under different actions, enabling ``imagination``, i.e., forecasting future states without real-world interactions. The Dreamer algorithms~\cite{hafner2023mastering} demonstrate that world models can master diverse control tasks by imagining trajectories in a latent space. Joint-embedding predictive architectures (JEPAs)~\cite{assran2023self} show that predicting in abstract representation space results in more efficient models than reconstructing raw observations.
+
+\textbf{Key challenges} for wireless world models include: (1) \emph{computational complexity}; Transformer-based models incur $O(T^2)$ cost where $T$ is the sequence length (number of time steps), prohibiting real-time inference for long horizons; (2) \emph{multi-scale dynamics}; channels exhibit fast fading, shadowing, and slow path loss that attention mechanisms struggle to capture efficiently; and (3) \emph{non-stationarity}; regime shifts (transitions between line-of-sight (LOS) and non-line-of-sight (NLOS) propagation conditions) violate assumptions of existing predictors.
+
+With that in mind, we propose \textbf{state-space world models (SSWMs)}. A \emph{state-space model} (SSM), essentially, is a sequence modeling architecture that maintains a hidden state evolving through linear dynamics; a \emph{selective SSM} (exemplified by Mamba~\cite{gu2024mamba}, an efficient alternative to Transformers) extends SSMs by making the dynamics parameters input-dependent, enabling content-based reasoning; and a \emph{state-space world model} combines selective SSMs with world model frameworks to learn predictive wireless representations. SSWMs achieve $O(T)$ complexity (linear in sequence length) thereby making proactive RAN intelligence computationally feasible. The learned model effectively computes a probability distribution over channel states during training and produces transmitter/receiver structures and processing strategies as consequent results of this learned channel distribution.
+
+\vspace{1em}
+\textbf{\textcolor{stanfordred}{\large Related Work.}}
+
+\textbf{Channel prediction.} Channel charting~\cite{studer2018channel} learns self-supervised channel state information (CSI; the frequency-domain representation of wireless channels) to location mappings. W-JEPA~\cite{chaaya2024learning} applies JEPAs to CSI, predicting future channel embeddings conditioned on velocity with improved long-horizon accuracy. Multimodal extensions~\cite{chaaya2025pixels} couple control and wireless JEPAs, reducing transmit power by 50\%. However, these approaches use recurrent neural networks (RNNs)/gated recurrent units (GRUs) with limited scalability and no action-conditioned planning.
+
+\textbf{Sequence models.} Structured state-space models (S4)~\cite{gu2021efficiently} and Mamba~\cite{gu2024mamba} achieve linear-time inference with 5$\times$ higher throughput than Transformers. Mamba, a selective SSM architecture, makes SSM parameters input-dependent through learned selection mechanisms, allowing content-based reasoning while maintaining $O(T)$ complexity. Mamba-2~\cite{dao2024transformers} further unifies SSMs with structured attention for hardware-efficient training.
+
+\textbf{World models.} DreamerV3~\cite{hafner2023mastering} uses recurrent state-space models (RSSMs) combining deterministic and stochastic states for imagination-based policy learning. V-JEPA 2~\cite{assran2025v} demonstrates that JEPA world models enable zero-shot robot planning.
+
+To the best of our knowledge, no work combines: (1) Mamba-style selective SSMs for efficient wireless prediction, (2) world model paradigms for action-conditioned planning, and (3) JEPA representation learning. SSWMs fill this gap.
+
+\vspace{1em}
+\textbf{\textcolor{stanfordred}{\large State-Space World Models.}}
+
+\textbf{Overview.} We propose learning a latent world model of wireless dynamics using selective state-space model backbones. Let $o_t \in \mathbb{R}^{n_o}$ denote observations at time $t$ (including CSI, Reference Signal Received Power (RSRP), Doppler shift, and timing advance), $a_t \in \mathbb{R}^{n_a}$ denote network actions (beam configurations, scheduling decisions, power control), and $z_t \in \mathbb{R}^d$ denote the latent representation that captures task-relevant wireless dynamics. The latent state $z_t$ serves as a compressed representation connecting observations to downstream tasks such as channel forecasting, resource optimization, and policy learning. This representation is derived from the recurrent hidden state $h_t \in \mathbb{R}^{n_h}$ of the selective SSM, which captures temporal history.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figs/sswm_fig.pdf}
+    \caption{\textbf{SSWM architecture.} Context encoder maps observations $o_t$ to embeddings $x_t$. Selective SSM maintains hidden state $h_t$ with input-dependent parameters $(A_t, B_t, C_t, \Delta_t)$, producing latent $z_t = C_t h_t$. Predictor $\psi_\phi$ forecasts $\hat{z}_{t+k}$ from planned actions. Target encoder (exponential moving average (EMA)-updated) provides targets $\tilde{z}_{t+k}$ from future observations. JEPA loss computes prediction error and drives backpropagation (dotted line to all trainable components). Task heads decode $z_t$ for rewards and policies.}
+    \label{fig:architecture}
+\end{figure}
+
+The world model learns to predict future representations and task-relevant quantities. Formally:
+\begin{align}
+h_{t+1} &= f_\theta(h_t, a_t, o_t), \quad z_t = C_t h_t, \quad \hat{r}_t = r_\theta(z_t),
+\end{align}
+where $f_\theta$ is the SSM dynamics function, $C_t$ is the output projection matrix, and $\hat{r}_t \in \mathbb{R}$ predicts scalar rewards (e.g., throughput, negative latency, reliability metrics). The main novelty lies in the following architectural components.
+
+\begin{enumerate}
+    \item \textit{Selective SSM dynamics.} The transition function $f_\theta$ is parameterized using Mamba-style selective SSM blocks. First, a context encoder maps observations to embeddings: $x_t = \text{Enc}_\theta(o_t) \in \mathbb{R}^{n_x}$. The SSM then processes these embeddings with input-dependent parameters:
+    \begin{align}
+        (A_t, B_t, C_t, \Delta_t) &= \text{SelectionNet}_\theta(x_t, a_t), \\
+        h_t &= \bar{A}_t h_{t-1} + \bar{B}_t [x_t; a_t], \quad z_t = C_t h_t,
+    \end{align}
+    where $h_t$ is the SSM hidden state, $A_t \in \mathbb{R}^{n_h \times n_h}$ is the state transition matrix, $B_t \in \mathbb{R}^{n_h \times (n_x + n_a)}$ is the input matrix, $C_t \in \mathbb{R}^{d \times n_h}$ is the output matrix, $\Delta_t \in \mathbb{R}^{n_h}$ is the discretization step size, and $\bar{A}_t, \bar{B}_t$ are their discretized versions. Unlike standard SSMs with fixed dynamics, selective parameters enable content-based gating, providing: (1) \emph{linear-time complexity} ($O(T)$) for efficient rollouts, (2) \emph{adaptive memory} that selectively retains relevant information, and (3) \emph{parallel training} via the SSM-convolution duality.
+
+    \item \textit{JEPA-style prediction.} Following the JEPA paradigm, we train the model to predict \emph{representations} of future observations rather than raw CSI. A predictor network $\psi_\phi$ takes the current representation and a sequence of planned actions to forecast future latent states:
+    \begin{align}
+        \hat{z}_{t+k} &= \psi_\phi(z_t, a_t, a_{t+1}, \ldots, a_{t+k-1}), \quad k = 1, \ldots, H,
+    \end{align}
+    where $H$ is the prediction horizon. The prediction targets come from a target encoder with exponential moving average (EMA)-updated parameters $\bar{\theta}$:
+    \begin{align}
+        \tilde{z}_{t+k} = \text{TargetEnc}_{\bar{\theta}}(o_{t+k}), \quad \mathcal{L}_{\text{JEPA}} = \sum_{k=1}^{H} \| \hat{z}_{t+k} - \text{sg}(\tilde{z}_{t+k}) \|^2,
+    \end{align}
+    where $\text{sg}(\cdot)$ denotes stop-gradient operation (preventing gradient flow to the target encoder). This learns representations capturing task-relevant dynamics without reconstructing high-dimensional CSI.
+
+    \item \textit{Multi-scale temporal hierarchy.} To capture the multi-scale nature of wireless dynamics, we employ a hierarchical state structure with different temporal resolutions, unified through cross-scale interactions with linear complexity. This allows $z_t$ to encode multi-timescale information relevant for both short-term beam tracking and long-term mobility prediction.
+\end{enumerate}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{|>{\columncolor{lightblue}}C{1cm}|L{5cm}|L{8.6cm}|}
+\hline
+\rowcolor{stanfordred}
+\textcolor{white}{\textbf{Phase}} & \textcolor{white}{\textbf{Research objectives}} & \textcolor{white}{\textbf{Key activities}} \\
+\hline
+\textbf{Q1} & \textbf{Foundations \& baselines} \newline Establish architectures, datasets, and baseline performance & 
+$\bullet$ Implement modular SSM and JEPA components \newline
+$\bullet$ Curate CSI datasets (DICHASUS, DeepMIMO, ray-traced, etc.) \newline
+$\bullet$ Reproduce W-JEPA baseline results \\
+\hline
+\textbf{Q2} & \textbf{SSWM architecture} \newline Develop and validate core state-space world model & 
+$\bullet$ Design selective SSM transition model \newline
+$\bullet$ Integrate JEPA prediction objective \newline
+$\bullet$ Ablations: state dimension, selection mechanism, etc. \newline
+$\bullet$ Compare against Transformer/RNN baselines \\
+\hline
+\textbf{Q3} & \textbf{Action-conditioned planning} \newline Extend SSWM for RAN optimization tasks & 
+$\bullet$ Implement imagination-based beam tracking \newline
+$\bullet$ Develop model-based resource scheduler \newline
+$\bullet$ Evaluate across mobility scenarios (3--120 km/h) \newline
+$\bullet$ Analyze computational-accuracy trade-offs \\
+\hline
+\textbf{Q4} & \textbf{Extensions \& dissemination} \newline Generalization studies and research dissemination & 
+$\bullet$ Cross-environment generalization analysis \newline
+$\bullet$ Multi-user extension and scalability study \newline
+$\bullet$ Complexity analysis (theoretical + empirical) \\
+\hline
+\end{tabular}
+\caption{One-year research timeline with quarterly milestones.}
+\label{tab:timeline}
+\end{table}
+
+\textbf{\textcolor{stanfordred}{Downstream tasks.}} The learned latent representation $z_t$ provides a unified interface for multiple RAN tasks:
+\begin{itemize}
+    \item \textbf{Channel forecasting.} Multi-step latent rollouts via the predictor $\psi_\phi$ provide representations for anticipatory beam tracking, link adaptation, and handover preparation.
+    \item \textbf{Resource optimization.} Simulating action consequences in latent space enables lookahead planning for scheduling, power control, and interference management.
+    \item \textbf{Data generation.} Learned dynamics generate realistic latent trajectories for training downstream policies, reducing costly over-the-air data collection.
+\end{itemize}
+
+\vspace{1em}
+\textbf{\textcolor{stanfordred}{\large One-Year Horizon.}}
+
+Table~\ref{tab:timeline} highlights the key activities corresponding to certain research objectives on a per-quarter basis for a one-year rollout of the project.
+
+\vspace{1em}
+\textbf{\textcolor{stanfordred}{\large Team Strengths.}}
+
+\textbf{Muhammad Ahmed Mohsin.} Specializes in RL, ML-for-optimization, and efficient post-training for reasoning models, bringing a strong algorithmic foundation for action-conditioned world models.
+
+\textbf{Muhammad Umer.} Specializes in optimization, control, and intelligent communications, spanning DRL for wireless resource allocation and proactive RAN design. Demonstrates end-to-end systems capability from building scalable wireless simulators and deploying generative sequence-model baselines for channel prediction/estimation.
+% \vspace{1em}
+% \textbf{\textcolor{stanfordred}{\large Alignment with Qualcomm.}}
+
+\newpage
+\textbf{\textcolor{stanfordred}{\large References.}}
+\vspace{-2em}
+\bibliographystyle{ieeetr}
+\renewcommand{\refname}{}
+\bibliography{ref}
+
+\end{document}
