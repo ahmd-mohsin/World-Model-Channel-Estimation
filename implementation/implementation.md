@@ -113,7 +113,11 @@ All dimensions live in a single config so blocks compose without shape surprises
    **M2 COMPLETE.** All modules GPU-validated (49/50 pass; the 1 "fail" is the forced-CUDA test
    harness colliding with Sionna CPU tensors — that test passes in a normal run).
 4. **M3 — Predictor + JEPA loss.** Full forward; loss decreases on a toy synthetic
-   sequence (e.g. AR(1) channel).
+   sequence (e.g. AR(1) channel). **DONE** — Predictor is an observation-free latent rollout
+   (actions only, no future-obs leak), outputs embed_dim (target space). 11 tests.
+   Full `SSWM` wiring (modules 1-5 + JEPA loss, shared SelectionNet) in `implementation/sswm.py`;
+   10 integration tests. **Sionna cross-check: predictor NMSE 0.0077 beats persistence 0.0237
+   (3.1×) and batch-mean 0.0108 — genuinely learns dynamics.** 21 tests pass on A100.
 5. **M4 — Trainer + data.** Synthetic channel generator (Jakes/AR Rayleigh) → training
    loop with logging; representation does not collapse (monitor embedding variance).
 6. **M5 — Task heads + eval.** Probe `z_t`/`ẑ_{t+k}` for channel-estimation NMSE vs. a
