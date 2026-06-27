@@ -19,7 +19,9 @@ class SSWMConfig:
     horizon_k: int = 4               # k: prediction horizon (predict z_{t+k})
 
     # ---- action geometry ----
-    action_dim: int = 8              # Tx/Rx config: pilot pattern, beam idx, MCS, ...
+    # Velocity action [vx, vy, speed, theta] — the physical control driving channel evolution.
+    # (Earlier a power-proxy action gave the predictor nothing to learn from; velocity fixed it.)
+    action_dim: int = 4
 
     # ---- latent dimensions ----
     embed_dim: int = 256             # x_t / z_t / z̃ dimensionality (pipeline-wide)
@@ -38,6 +40,12 @@ class SSWMConfig:
     backbone: str = "lwm"
     use_pretrained: bool = True              # False -> force stub regardless of `backbone`
     freeze_backbone: bool = True
+    # LoRA-unfreeze the backbone: inject trainable low-rank adapters into LWM attention while
+    # keeping base weights frozen. Gives the frozen encoder capacity to adapt to Sionna channels
+    # for large-scale training (zero cost when False).
+    lora: bool = False
+    lora_rank: int = 8
+    lora_alpha: int = 16
 
     # LWM (wireless) backbone
     lwm_checkpoint: str = "model.pth"

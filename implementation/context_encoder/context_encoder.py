@@ -35,6 +35,11 @@ class ContextEncoder(nn.Module):
         if config.freeze_backbone:
             self._freeze_pretrained()
 
+        if config.lora:
+            from .lora import inject_lora
+            n = inject_lora(self.backbone, r=config.lora_rank, alpha=config.lora_alpha)
+            print(f"[ContextEncoder] injected LoRA into {n} linear layers (rank {config.lora_rank})")
+
         self._maybe_load_head()
 
     def _maybe_load_head(self) -> None:

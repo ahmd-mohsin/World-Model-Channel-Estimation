@@ -289,18 +289,40 @@ observation-driven `step()` would let the model cheat); (2) the output lives in 
 (the target-encoder space the JEPA loss compares against), not SSM-latent space — guarded by a
 test that makes the two dimensions unequal.
 
-**Cross-check on real Sionna channels** (`scripts/validate-predictor-sionna.py`): trained the full
-SSWM JEPA objective on 256 Sionna sequences, then compared the predictor to trivial baselines in
-the same embedding space:
+The predictor predicts a **residual** on top of the present (`residual_prediction`, default on),
+with the output layer **zero-initialized** so it *starts exactly at persistence* and learns only the
+motion-driven correction.
 
-| predictor | persistence (echo present) | batch-mean |
-| --------- | -------------------------- | ---------- |
-| **NMSE 0.0077** | 0.0237 (3.1× worse) | 0.0108 (1.4× worse) |
+**Results — a real win, after fixing the formulation.** A naive first attempt (uninformative
+power-proxy action, sub-wavelength motion, prediction in LWM's noise-invariant embedding space) lost
+to persistence: the channel barely moved and there was nothing to condition on. We diagnosed it and
+fixed three things:
 
-Beating persistence 3.1× is the key evidence the model **learned channel dynamics** — a world
-model that hadn't would only tie "echo the present." (Honest caveat: small-scale single-scene run;
-embedding std is modest, so partial-collapse pressure exists — scaling data diversity + folding
-VICReg into the full objective is future work.)
+1. **Velocity as the action** — the actual physical control driving channel evolution (not a power
+   proxy).
+2. **Larger inter-frame motion** (0.15 m/step ≈ λ) so the channel decorrelates enough to be worth
+   predicting.
+3. **Predict in raw channel space**, residual-on-present, with per-channel standardization (so the
+   ~15× cross-scene scale spread doesn't dominate the loss) and dropout.
+
+On a **12,000-sequence, 5-scene held-out** test, the predictor now **beats persistence**:
+
+| | predictor | persistence (echo present) | linear extrapolation |
+| --- | --------- | -------------------------- | -------------------- |
+| held-out NMSE | **0.315** | 0.420 | 1.260 |
+
+**1.33× better than persistence**, while linear extrapolation is far *worse* (1.26) — confirming the
+channel's motion is **nonlinear phase rotation** that only a learned, velocity-conditioned model
+captures. This is the evidence the world model learned genuine channel dynamics. (Repro:
+`scripts/gen_sionna_actions.py` + `scripts/train-raw-predictor.py`.)
+
+**These corrections flow through the full pipeline.** Feeding the same fixes (velocity actions +
+per-channel standardized inputs, via `wireless_data/ShardDataset`) into the complete `SSWM` — which
+predicts in LWM's embedding space — the in-pipeline predictor now also **beats persistence: 1.15×**
+(held-out NMSE 0.0236 vs 0.0271, batch-mean 0.100), on the same 12k/5-scene split. The win is
+smaller than the raw-space model because LWM's noise-invariance compresses present and future
+embeddings together, but it is a genuine improvement of an already-strong baseline on a frozen
+backbone. (Repro: `scripts/train-sswm-scaled.py`.)
 
 ### Integration — the full SSWM (`implementation/sswm.py`)
 

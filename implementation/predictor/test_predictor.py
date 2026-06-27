@@ -56,8 +56,18 @@ def test_forward_matches_rollout_last_step():
     assert torch.allclose(last, traj[:, -1], atol=1e-6)
 
 
+def test_residual_init_is_zero():
+    # With residual_prediction, the predictor must start at the persistence prior:
+    # its output (the residual) is exactly zero at init, regardless of inputs.
+    cfg = _cfg()  # residual_prediction=True by default
+    pred = Predictor(cfg).eval()
+    z = torch.randn(2, cfg.latent_dim)
+    acts = torch.randn(2, cfg.horizon_k, cfg.action_dim)
+    assert torch.allclose(pred(z, acts), torch.zeros(2, cfg.embed_dim), atol=1e-7)
+
+
 def test_depends_on_actions():
-    cfg = _cfg()
+    cfg = _cfg(residual_prediction=False)
     pred = Predictor(cfg).eval()
     z = torch.randn(2, cfg.latent_dim)
     a1 = torch.zeros(2, cfg.horizon_k, cfg.action_dim)
@@ -66,7 +76,7 @@ def test_depends_on_actions():
 
 
 def test_depends_on_z():
-    cfg = _cfg()
+    cfg = _cfg(residual_prediction=False)
     pred = Predictor(cfg).eval()
     acts = torch.randn(2, cfg.horizon_k, cfg.action_dim)
     z1 = torch.zeros(2, cfg.latent_dim)
@@ -76,7 +86,7 @@ def test_depends_on_z():
 
 def test_horizon_changes_prediction():
     # Predicting k=1 vs k=3 ahead should differ (different number of rollout steps).
-    cfg = _cfg()
+    cfg = _cfg(residual_prediction=False)
     pred = Predictor(cfg).eval()
     z = torch.randn(2, cfg.latent_dim)
     acts = torch.randn(2, 3, cfg.action_dim)
