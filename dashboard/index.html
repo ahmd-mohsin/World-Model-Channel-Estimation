@@ -3,125 +3,263 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>SSWM — End-to-End Training Dashboard</title>
+<title>SSWM · World-Model Channel Estimation</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
 <style>
-  :root { --bg:#0d1117; --card:#161b22; --fg:#e6edf3; --mut:#8b949e; --acc:#58a6ff; --grid:#30363d; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font-family:-apple-system,Segoe UI,Roboto,sans-serif; }
-  header { padding:20px 28px; border-bottom:1px solid var(--grid); }
-  h1 { margin:0; font-size:20px; } .sub { color:var(--mut); font-size:13px; margin-top:4px; }
-  .wrap { padding:24px 28px; display:grid; gap:20px; grid-template-columns:repeat(2,1fr); max-width:1400px; }
-  .card { background:var(--card); border:1px solid var(--grid); border-radius:10px; padding:16px 18px; }
-  .card h2 { margin:0 0 12px; font-size:14px; font-weight:600; color:var(--fg); }
-  .full { grid-column:1 / -1; }
-  .kpis { display:flex; gap:24px; flex-wrap:wrap; }
-  .kpi { background:var(--card); border:1px solid var(--grid); border-radius:10px; padding:12px 18px; min-width:150px; }
-  .kpi .v { font-size:26px; font-weight:700; color:var(--acc); } .kpi .l { font-size:12px; color:var(--mut); margin-top:2px; }
-  canvas { max-height:300px; }
-  .status { font-size:12px; color:var(--mut); }
-  .win { color:#3fb950; } .loss { color:#f85149; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  th,td { text-align:right; padding:6px 10px; border-bottom:1px solid var(--grid); } th:first-child,td:first-child{text-align:left;}
+  :root{ --bg:#0a0e14; --card:#121823; --card2:#0f141d; --fg:#e6edf3; --mut:#7d8794;
+         --acc:#58a6ff; --grn:#3fb950; --org:#e3b341; --pur:#bc8cff; --red:#f85149; --grid:#222c3a; }
+  *{box-sizing:border-box;} html,body{margin:0;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,Segoe UI,Roboto,Inter,sans-serif;}
+  header{padding:18px 30px;border-bottom:1px solid var(--grid);
+    background:linear-gradient(90deg,#121823,#0a0e14);display:flex;justify-content:space-between;align-items:center;}
+  h1{margin:0;font-size:19px;font-weight:700;letter-spacing:.2px;}
+  h1 span{color:var(--acc);} .sub{color:var(--mut);font-size:12.5px;margin-top:3px;}
+  .pill{font-size:12px;padding:6px 12px;border:1px solid var(--grid);border-radius:20px;color:var(--mut);}
+  .live{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--grn);margin-right:6px;
+    animation:pulse 1.6s infinite;} @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  .wrap{padding:22px 30px;display:grid;gap:18px;grid-template-columns:repeat(12,1fr);max-width:1640px;margin:auto;}
+  .card{background:var(--card);border:1px solid var(--grid);border-radius:12px;padding:16px 18px;
+    box-shadow:0 1px 0 #ffffff05 inset;}
+  .card h2{margin:0 0 12px;font-size:13px;font-weight:600;letter-spacing:.3px;color:#c9d4e0;text-transform:uppercase;}
+  .c12{grid-column:span 12;} .c8{grid-column:span 8;} .c6{grid-column:span 6;}
+  .c5{grid-column:span 5;} .c7{grid-column:span 7;} .c4{grid-column:span 4;} .c3{grid-column:span 3;}
+  .kpi{background:linear-gradient(135deg,#141c29,#0e131c);border:1px solid var(--grid);border-radius:12px;padding:14px 16px;}
+  .kpi .v{font-size:27px;font-weight:800;color:var(--acc);font-variant-numeric:tabular-nums;}
+  .kpi .l{font-size:11.5px;color:var(--mut);margin-top:3px;text-transform:uppercase;letter-spacing:.4px;}
+  .kpi.g .v{color:var(--grn);} .kpi.o .v{color:var(--org);} .kpi.p .v{color:var(--pur);}
+  canvas{max-height:280px;} #scene3d{width:100%;height:420px;border-radius:8px;display:block;background:#070a0f;}
+  table{width:100%;border-collapse:collapse;font-size:13px;} th,td{text-align:right;padding:7px 10px;border-bottom:1px solid var(--grid);}
+  th:first-child,td:first-child{text-align:left;color:var(--mut);} .win{color:var(--grn);font-weight:700;} .loss{color:var(--red);}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--mut);margin-top:8px;}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle;}
+  select{background:var(--card2);color:var(--fg);border:1px solid var(--grid);border-radius:6px;padding:5px 8px;font-size:12px;}
+  #heat{display:grid;gap:1px;} .hcell{width:100%;aspect-ratio:1;border-radius:1px;}
 </style>
 </head>
 <body>
 <header>
-  <h1>SSWM — Selective State-Space World Model · End-to-End Training</h1>
-  <div class="sub">100k Sionna channels · 5 scenes · 8× A100 (DDP + LoRA) · <span id="status" class="status">loading…</span></div>
+  <div><h1><span>SSWM</span> · Selective State-Space World Model for Channel Estimation</h1>
+    <div class="sub">100k Sionna RT channels · 5 city scenes · 8× A100 · DDP + LoRA end-to-end</div></div>
+  <div class="pill"><span class="live"></span><span id="status">connecting…</span></div>
 </header>
 
 <div class="wrap">
-  <div class="kpis full" id="kpis"></div>
+  <!-- KPIs -->
+  <div class="c3 kpi"><div class="v" id="k_total">–</div><div class="l">Total loss</div></div>
+  <div class="c3 kpi g"><div class="v" id="k_chan">–</div><div class="l">Channel NMSE (10 dB)</div></div>
+  <div class="c3 kpi o"><div class="v" id="k_seqs">–</div><div class="l">Sequences</div></div>
+  <div class="c3 kpi p"><div class="v" id="k_step">–</div><div class="l">Train step</div></div>
 
-  <div class="card"><h2>Total loss</h2><canvas id="cTotal"></canvas></div>
-  <div class="card"><h2>Per-module losses</h2><canvas id="cModules"></canvas></div>
-  <div class="card"><h2>Channel-estimation NMSE (train, denoising)</h2><canvas id="cChan"></canvas></div>
-  <div class="card"><h2>Embedding std (collapse monitor)</h2><canvas id="cStd"></canvas></div>
+  <!-- 3D scene -->
+  <div class="c7 card"><h2>3D Ray-Tracing Scene · TX + RX trajectory samples</h2>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+      <select id="sceneSel"></select>
+      <span class="sub" id="sceneInfo"></span>
+    </div>
+    <canvas id="scene3d"></canvas>
+    <div class="legend"><span><span class="dot" style="background:#f85149"></span>Transmitter</span>
+      <span><span class="dot" style="background:#58a6ff"></span>Receiver samples</span>
+      <span><span class="dot" style="background:#3fb950"></span>Ground plane (scene footprint)</span></div>
+  </div>
 
-  <div class="card full"><h2>Channel estimation vs classical baselines (held-out, NMSE by SNR)</h2><canvas id="cSweep"></canvas></div>
-  <div class="card"><h2>World-model predictor (held-out)</h2><div id="wmTable"></div></div>
-  <div class="card"><h2>Learning rate</h2><canvas id="cLR"></canvas></div>
+  <!-- channel est sweep -->
+  <div class="c5 card"><h2>Channel Estimation vs LS / MMSE (held-out)</h2>
+    <canvas id="cSweep"></canvas>
+    <div id="wmTable" style="margin-top:12px;"></div>
+  </div>
+
+  <!-- losses -->
+  <div class="c4 card"><h2>Total loss</h2><canvas id="cTotal"></canvas></div>
+  <div class="c4 card"><h2>Per-module losses</h2><canvas id="cMods"></canvas>
+    <div class="legend"><span><span class="dot" style="background:#3fb950"></span>JEPA (world model)</span>
+      <span><span class="dot" style="background:#e3b341"></span>VICReg</span>
+      <span><span class="dot" style="background:#bc8cff"></span>Channel est.</span></div></div>
+  <div class="c4 card"><h2>Channel NMSE — SSWM vs LS (training)</h2><canvas id="cChan"></canvas></div>
+
+  <!-- channel statistics -->
+  <div class="c4 card"><h2>Channel magnitude distribution (per scene)</h2><canvas id="cMag"></canvas></div>
+  <div class="c4 card"><h2>Temporal correlation (channel vs t=0)</h2><canvas id="cCorr"></canvas></div>
+  <div class="c4 card"><h2>Embedding std (collapse monitor)</h2><canvas id="cStd"></canvas></div>
+
+  <div class="c6 card"><h2>Per-antenna / per-subcarrier energy <span id="profScene" class="sub"></span></h2><canvas id="cProf"></canvas></div>
+  <div class="c6 card"><h2>Example channel grid Re{H} <span id="heatScene" class="sub"></span></h2>
+    <div id="heat"></div></div>
+
+  <div class="c12 card"><h2>Learning rate schedule</h2><canvas id="cLR"></canvas></div>
 </div>
 
-<script>
-const C = { acc:'#58a6ff', grn:'#3fb950', org:'#d29922', red:'#f85149', pur:'#bc8cff', mut:'#8b949e' };
-const baseOpts = (logy=false) => ({
-  responsive:true, animation:false,
-  scales:{ x:{ grid:{color:'#30363d'}, ticks:{color:'#8b949e'} },
-           y:{ type:logy?'logarithmic':'linear', grid:{color:'#30363d'}, ticks:{color:'#8b949e'} } },
-  plugins:{ legend:{ labels:{color:'#e6edf3'} } }
-});
-function line(id,datasets,logy=false){ return new Chart(document.getElementById(id),
-  {type:'line',data:{datasets},options:baseOpts(logy)}); }
-const charts = {
-  total: line('cTotal',[{label:'total',data:[],borderColor:C.acc,pointRadius:0,tension:.2}]),
-  mods: line('cModules',[
-    {label:'jepa',data:[],borderColor:C.grn,pointRadius:0,tension:.2},
-    {label:'vic',data:[],borderColor:C.org,pointRadius:0,tension:.2},
-    {label:'chan',data:[],borderColor:C.pur,pointRadius:0,tension:.2}]),
-  chan: line('cChan',[
-    {label:'SSWM chan NMSE',data:[],borderColor:C.acc,pointRadius:0,tension:.2},
-    {label:'LS NMSE',data:[],borderColor:C.mut,borderDash:[5,5],pointRadius:0,tension:.2}],true),
-  std: line('cStd',[
-    {label:'pred_std',data:[],borderColor:C.acc,pointRadius:0,tension:.2},
-    {label:'target_std',data:[],borderColor:C.org,pointRadius:0,tension:.2}]),
-  lr: line('cLR',[{label:'lr',data:[],borderColor:C.pur,pointRadius:0,tension:.2}]),
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const COL={acc:'#58a6ff',grn:'#3fb950',org:'#e3b341',pur:'#bc8cff',red:'#f85149',mut:'#7d8794'};
+const palette=['#58a6ff','#3fb950','#e3b341','#bc8cff','#f85149','#56d4dd'];
+const oc=(logy=false)=>({responsive:true,animation:false,
+  scales:{x:{grid:{color:'#222c3a'},ticks:{color:'#7d8794',maxTicksLimit:8}},
+          y:{type:logy?'logarithmic':'linear',grid:{color:'#222c3a'},ticks:{color:'#7d8794'}}},
+  plugins:{legend:{display:false}}});
+const L=(id,ds,logy=false)=>new Chart(document.getElementById(id),{type:'line',data:{datasets:ds},options:oc(logy)});
+
+const ch={
+  total:L('cTotal',[{data:[],borderColor:COL.acc,pointRadius:0,tension:.25,fill:true,backgroundColor:'#58a6ff15'}]),
+  mods:L('cMods',[{data:[],borderColor:COL.grn,pointRadius:0,tension:.25},
+                  {data:[],borderColor:COL.org,pointRadius:0,tension:.25},
+                  {data:[],borderColor:COL.pur,pointRadius:0,tension:.25}]),
+  chan:L('cChan',[{data:[],borderColor:COL.pur,pointRadius:0,tension:.25},
+                  {data:[],borderColor:COL.mut,borderDash:[5,4],pointRadius:0,tension:.25}],true),
+  std:L('cStd',[{data:[],borderColor:COL.acc,pointRadius:0,tension:.25},
+                {data:[],borderColor:COL.org,pointRadius:0,tension:.25}]),
+  lr:L('cLR',[{data:[],borderColor:COL.pur,pointRadius:0,tension:.25}]),
 };
-let sweepChart=null;
+let sweepC=null, magC=null, corrC=null, profC=null;
 
-function kpi(v,l,cls=''){ return `<div class="kpi"><div class="v ${cls}">${v}</div><div class="l">${l}</div></div>`; }
+// ---------- 3D scene ----------
+let renderer,scene3,cam,ctrl,sceneGroup;
+function init3d(){
+  const cv=document.getElementById('scene3d');
+  renderer=new THREE.WebGLRenderer({canvas:cv,antialias:true});
+  renderer.setSize(cv.clientWidth,cv.clientHeight,false);
+  renderer.setPixelRatio(devicePixelRatio);
+  scene3=new THREE.Scene(); scene3.background=new THREE.Color(0x070a0f);
+  cam=new THREE.PerspectiveCamera(55,cv.clientWidth/cv.clientHeight,0.1,5000);
+  cam.position.set(0,180,260);
+  ctrl=new OrbitControls(cam,renderer.domElement); ctrl.enableDamping=true;
+  scene3.add(new THREE.AmbientLight(0xffffff,0.8));
+  const d=new THREE.DirectionalLight(0xffffff,0.6); d.position.set(1,2,1); scene3.add(d);
+  sceneGroup=new THREE.Group(); scene3.add(sceneGroup);
+  (function loop(){requestAnimationFrame(loop);ctrl.update();renderer.render(scene3,cam);})();
+}
+function drawScene(s){
+  sceneGroup.clear();
+  const g=s.geometry; if(!g||g.error) return;
+  const mn=g.bbox_min, mx=g.bbox_max;
+  const cx=(mn[0]+mx[0])/2, cy=(mn[1]+mx[1])/2;
+  const w=mx[0]-mn[0], h=mx[1]-mn[1];
+  // ground (footprint) -- map scene x,y to three x,z
+  const plane=new THREE.Mesh(new THREE.PlaneGeometry(w,h),
+    new THREE.MeshStandardMaterial({color:0x102015,transparent:true,opacity:0.5,side:THREE.DoubleSide}));
+  plane.rotation.x=-Math.PI/2; sceneGroup.add(plane);
+  const grid=new THREE.GridHelper(Math.max(w,h),24,0x2a3a2a,0x18241a);
+  sceneGroup.add(grid);
+  // TX
+  const tx=new THREE.Mesh(new THREE.SphereGeometry(Math.max(w,h)*0.012,16,16),
+    new THREE.MeshStandardMaterial({color:0xf85149,emissive:0x661111}));
+  tx.position.set(g.tx[0]-cx, g.tx[2], -(g.tx[1]-cy)); sceneGroup.add(tx);
+  const beam=new THREE.Mesh(new THREE.CylinderGeometry(0.5,0.5,g.tx[2],8),
+    new THREE.MeshBasicMaterial({color:0xf85149,transparent:true,opacity:.3}));
+  beam.position.set(g.tx[0]-cx,g.tx[2]/2,-(g.tx[1]-cy)); sceneGroup.add(beam);
+  // RX points
+  const pts=s.rx_positions;
+  const geo=new THREE.BufferGeometry();
+  const arr=new Float32Array(pts.length*3);
+  pts.forEach((p,i)=>{arr[i*3]=p[0]-cx; arr[i*3+1]=p[2]; arr[i*3+2]=-(p[1]-cy);});
+  geo.setAttribute('position',new THREE.BufferAttribute(arr,3));
+  sceneGroup.add(new THREE.Points(geo,new THREE.PointsMaterial({color:0x58a6ff,size:Math.max(w,h)*0.006})));
+  const span=Math.max(w,h); cam.position.set(0,span*0.5,span*0.7); ctrl.target.set(0,0,0);
+}
 
-async function refresh(){
-  let hist=[];
-  try { hist = await (await fetch('metrics.json?_='+Date.now())).json(); } catch(e){}
-  if(hist.length){
-    const last=hist[hist.length-1];
-    document.getElementById('status').textContent =
-      `step ${last.step} · ${(last.elapsed||0).toFixed(0)}s · ${hist.length} points`;
-    const X=hist.map(h=>h.step);
-    const set=(c,key)=>{ c.data.labels=X; };
-    charts.total.data.labels=X; charts.total.data.datasets[0].data=hist.map(h=>h.total); charts.total.update();
-    charts.mods.data.labels=X;
-    charts.mods.data.datasets[0].data=hist.map(h=>h.jepa);
-    charts.mods.data.datasets[1].data=hist.map(h=>h.vic);
-    charts.mods.data.datasets[2].data=hist.map(h=>h.chan); charts.mods.update();
-    charts.chan.data.labels=X;
-    charts.chan.data.datasets[0].data=hist.map(h=>h.chan_nmse);
-    charts.chan.data.datasets[1].data=hist.map(h=>h.ls_nmse); charts.chan.update();
-    charts.std.data.labels=X;
-    charts.std.data.datasets[0].data=hist.map(h=>h.pred_std);
-    charts.std.data.datasets[1].data=hist.map(h=>h.target_std); charts.std.update();
-    charts.lr.data.labels=X; charts.lr.data.datasets[0].data=hist.map(h=>h.lr); charts.lr.update();
-    document.getElementById('kpis').innerHTML =
-      kpi(last.total.toFixed(4),'total loss') +
-      kpi(last.jepa.toFixed(4),'JEPA loss') +
-      kpi(last.chan_nmse.toFixed(4),'channel NMSE') +
-      kpi(last.pred_std.toFixed(3),'pred std (>0 ok)') +
-      kpi(last.step,'step');
+function kpi(id,v){document.getElementById(id).textContent=v;}
+
+async function jget(u){ try{return await (await fetch(u+'?_='+Date.now())).json();}catch(e){return null;} }
+
+// ---------- scenes / statistics ----------
+let scenesData=null;
+async function loadScenes(){
+  const s=await jget('scenes.json'); if(!s) return;
+  scenesData=s;
+  kpi('k_seqs', (s.global.total_sequences||0).toLocaleString());
+  const sel=document.getElementById('sceneSel');
+  if(sel.options.length===0){
+    s.global.scene_names.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o);});
+    sel.onchange=()=>renderScene(sel.value);
   }
-  let ev=null;
-  try { ev = await (await fetch('eval.json?_='+Date.now())).json(); } catch(e){}
+  // magnitude distribution (all scenes)
+  const names=s.global.scene_names;
+  const magDs=names.map((n,i)=>({label:n,data:s.scenes[n].mag_hist.density.map((d,j)=>({x:s.scenes[n].mag_hist.edges[j],y:d})),
+    borderColor:palette[i%palette.length],pointRadius:0,tension:.3}));
+  if(magC)magC.destroy();
+  magC=new Chart(document.getElementById('cMag'),{type:'line',data:{datasets:magDs},
+    options:{...oc(),plugins:{legend:{labels:{color:'#7d8794',font:{size:10}}}},scales:{...oc().scales,x:{...oc().scales.x,type:'linear',title:{display:true,text:'log10 |H|',color:'#7d8794'}}}}});
+  // temporal corr
+  const corrDs=names.map((n,i)=>({label:n,data:s.scenes[n].temporal_corr,borderColor:palette[i%palette.length],pointRadius:2,tension:.3}));
+  if(corrC)corrC.destroy();
+  corrC=new Chart(document.getElementById('cCorr'),{type:'line',
+    data:{labels:s.scenes[names[0]].temporal_corr.map((_,i)=>i),datasets:corrDs},
+    options:{...oc(),plugins:{legend:{labels:{color:'#7d8794',font:{size:10}}}}}});
+  renderScene(sel.value||names[0]);
+}
+function renderScene(name){
+  const s=scenesData.scenes[name]; if(!s)return;
+  drawScene(s);
+  const g=s.geometry;
+  document.getElementById('sceneInfo').textContent=
+    g.span?`footprint ${g.span[0].toFixed(0)}×${g.span[1].toFixed(0)} m · ${s.n_sequences} seqs · mean|H| ${s.mean_mag.toFixed(1)}`:'';
+  document.getElementById('profScene').textContent='· '+name;
+  document.getElementById('heatScene').textContent='· '+name;
+  // antenna / subcarrier energy
+  if(profC)profC.destroy();
+  profC=new Chart(document.getElementById('cProf'),{type:'line',data:{
+    labels:s.subcarrier_energy.map((_,i)=>i),
+    datasets:[{label:'subcarrier',data:s.subcarrier_energy,borderColor:COL.acc,pointRadius:0,tension:.3},
+              {label:'antenna',data:s.antenna_energy,borderColor:COL.org,pointRadius:0,tension:.3}]},
+    options:{...oc(),plugins:{legend:{labels:{color:'#7d8794',font:{size:10}}}}}});
+  // heatmap
+  const grid=s.example_channel_real; const rows=grid.length, cols=grid[0].length;
+  let mx=0; grid.forEach(r=>r.forEach(v=>mx=Math.max(mx,Math.abs(v))));
+  const heat=document.getElementById('heat');
+  heat.style.gridTemplateColumns=`repeat(${cols},1fr)`;
+  heat.innerHTML='';
+  grid.forEach(r=>r.forEach(v=>{const d=document.createElement('div');d.className='hcell';
+    const t=v/(mx||1); const c=t>0?`rgba(88,166,255,${Math.abs(t)})`:`rgba(248,81,73,${Math.abs(t)})`;
+    d.style.background=c; heat.appendChild(d);}));
+}
+
+// ---------- training metrics ----------
+async function loadMetrics(){
+  const hist=await jget('metrics.json');
+  if(hist&&hist.length){
+    const last=hist[hist.length-1];
+    document.getElementById('status').textContent=`training · step ${last.step} · ${(last.elapsed||0).toFixed(0)}s`;
+    kpi('k_total',last.total.toFixed(3)); kpi('k_chan',last.chan_nmse.toFixed(4)); kpi('k_step',last.step);
+    const X=hist.map(h=>h.step);
+    const upd=(c,arrs)=>{c.data.labels=X;arrs.forEach((a,i)=>c.data.datasets[i].data=a);c.update();};
+    upd(ch.total,[hist.map(h=>h.total)]);
+    upd(ch.mods,[hist.map(h=>h.jepa),hist.map(h=>h.vic),hist.map(h=>h.chan)]);
+    upd(ch.chan,[hist.map(h=>h.chan_nmse),hist.map(h=>h.ls_nmse)]);
+    upd(ch.std,[hist.map(h=>h.pred_std),hist.map(h=>h.target_std)]);
+    upd(ch.lr,[hist.map(h=>h.lr)]);
+  } else { document.getElementById('status').textContent='waiting for training metrics…'; }
+
+  const ev=await jget('eval.json');
   if(ev){
-    const snrs=Object.keys(ev.channel_sweep);
-    const g=k=>snrs.map(s=>ev.channel_sweep[s][k]);
-    const ds=[
-      {label:'LS',data:g('ls'),backgroundColor:C.mut},
-      {label:'MMSE',data:g('mmse'),backgroundColor:C.org},
-      {label:'SSWM',data:g('sswm'),backgroundColor:C.acc}];
-    if(sweepChart) sweepChart.destroy();
-    sweepChart=new Chart(document.getElementById('cSweep'),{type:'bar',
-      data:{labels:snrs.map(s=>s+' dB'),datasets:ds},
-      options:{...baseOpts(true),scales:{...baseOpts(true).scales}}});
+    const snrs=Object.keys(ev.channel_sweep), gg=k=>snrs.map(s=>ev.channel_sweep[s][k]);
+    if(sweepC)sweepC.destroy();
+    sweepC=new Chart(document.getElementById('cSweep'),{type:'bar',
+      data:{labels:snrs.map(s=>s+' dB'),datasets:[
+        {label:'LS',data:gg('ls'),backgroundColor:COL.mut},
+        {label:'MMSE',data:gg('mmse'),backgroundColor:COL.org},
+        {label:'SSWM',data:gg('sswm'),backgroundColor:COL.acc}]},
+      options:{...oc(true),plugins:{legend:{labels:{color:'#c9d4e0'}}}}});
     const r=ev.pers_nmse/Math.max(ev.pred_nmse,1e-9);
     document.getElementById('wmTable').innerHTML=
-      `<table><tr><th>quantity</th><th>NMSE</th></tr>
-       <tr><td>predictor</td><td>${ev.pred_nmse.toFixed(4)}</td></tr>
+      `<table><tr><th>world-model predictor</th><th>NMSE</th></tr>
+       <tr><td>predictor (ẑ)</td><td>${ev.pred_nmse.toFixed(4)}</td></tr>
        <tr><td>persistence</td><td>${ev.pers_nmse.toFixed(4)}</td></tr>
-       <tr><td>vs persistence</td><td class="${r>1.02?'win':'loss'}">${r.toFixed(2)}×</td></tr></table>`;
+       <tr><td>improvement</td><td class="${r>1.02?'win':'loss'}">${r.toFixed(2)}×</td></tr></table>`;
   }
 }
-refresh(); setInterval(refresh, 5000);
+
+init3d();
+loadScenes(); loadMetrics();
+setInterval(loadMetrics,5000); setInterval(loadScenes,30000);
+addEventListener('resize',()=>{const cv=document.getElementById('scene3d');
+  renderer.setSize(cv.clientWidth,cv.clientHeight,false);cam.aspect=cv.clientWidth/cv.clientHeight;cam.updateProjectionMatrix();});
 </script>
 </body>
 </html>
