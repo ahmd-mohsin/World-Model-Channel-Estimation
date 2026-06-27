@@ -316,13 +316,23 @@ channel's motion is **nonlinear phase rotation** that only a learned, velocity-c
 captures. This is the evidence the world model learned genuine channel dynamics. (Repro:
 `scripts/gen_sionna_actions.py` + `scripts/train-raw-predictor.py`.)
 
-**These corrections flow through the full pipeline.** Feeding the same fixes (velocity actions +
-per-channel standardized inputs, via `wireless_data/ShardDataset`) into the complete `SSWM` — which
-predicts in LWM's embedding space — the in-pipeline predictor now also **beats persistence: 1.15×**
-(held-out NMSE 0.0236 vs 0.0271, batch-mean 0.100), on the same 12k/5-scene split. The win is
-smaller than the raw-space model because LWM's noise-invariance compresses present and future
-embeddings together, but it is a genuine improvement of an already-strong baseline on a frozen
-backbone. (Repro: `scripts/train-sswm-scaled.py`.)
+**These corrections flow through the full pipeline, at scale.** Feeding the same fixes (velocity
+actions + per-channel standardized inputs, via `wireless_data/ShardDataset`) into the complete
+`SSWM`, we ran **large-scale distributed training**: **60,000 Sionna sequences** (5 scenes, all 8
+A100s) → **DDP across all 8 GPUs** with a **LoRA-unfrozen LWM** backbone (rank-8 adapters on every
+attention layer, base weights frozen). Held-out (3k unseen sequences):
+
+| metric | predictor | persistence | batch-mean |
+| ------ | --------- | ----------- | ---------- |
+| **NMSE** (↓) | **0.0250** | 0.0358 | 0.0906 |
+| **cosine** (↑) | **0.9880** | 0.9834 | — |
+
+**1.43× better than persistence on NMSE** (and wins on cosine) — the strongest result across all
+runs, and the same SSWM that *lost* to persistence before the corrections. (Repro:
+`torchrun --nproc_per_node=8 scripts/train-ddp.py --data_dir data/act60k`. Training saturates by
+~2k steps; LWM frozen + LoRA = ~266K trainable params/GPU.)
+
+Earlier single-GPU scaled run (12k seqs, no LoRA) gave 1.15× — LoRA + more data lifted it to 1.43×.
 
 ### Integration — the full SSWM (`implementation/sswm.py`)
 
