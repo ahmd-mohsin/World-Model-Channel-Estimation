@@ -121,7 +121,10 @@ All dimensions live in a single config so blocks compose without shape surprises
 5. **M4 — Trainer + data.** Synthetic channel generator (Jakes/AR Rayleigh) → training
    loop with logging; representation does not collapse (monitor embedding variance).
 6. **M5 — Task heads + eval.** Probe `z_t`/`ẑ_{t+k}` for channel-estimation NMSE vs. a
-   classical LS/MMSE baseline.
+   classical LS/MMSE baseline. **DONE** — channel head (latent + raw-obs skip, residual-on-obs)
+   beats LS up to ~5× at low SNR, approaches MMSE without oracle covariance/noise stats. Found &
+   fixed the lossy-latent issue (LWM not invertible to channel). 10 tests. **ALL 6 MODULES COMPLETE,
+   82 tests pass on A100.**
 
 ---
 

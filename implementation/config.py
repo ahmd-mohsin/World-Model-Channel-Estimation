@@ -39,6 +39,9 @@ class SSWMConfig:
     # "stub"  : offline random encoder, same output contract (for tests / no network).
     backbone: str = "lwm"
     use_pretrained: bool = True              # False -> force stub regardless of `backbone`
+    # freeze_backbone=True keeps LWM frozen (probe/LoRA). Set False to FULLY fine-tune LWM
+    # end-to-end (all backbone weights trainable) -- the "go full deep" setting. Use a smaller
+    # LR for the backbone than for fresh heads (see trainer's param groups).
     freeze_backbone: bool = True
     # LoRA-unfreeze the backbone: inject trainable low-rank adapters into LWM attention while
     # keeping base weights frozen. Gives the frozen encoder capacity to adapt to Sionna channels

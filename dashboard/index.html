@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>SSWM — End-to-End Training Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --fg:#e6edf3; --mut:#8b949e; --acc:#58a6ff; --grid:#30363d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font-family:-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:20px 28px; border-bottom:1px solid var(--grid); }
+  h1 { margin:0; font-size:20px; } .sub { color:var(--mut); font-size:13px; margin-top:4px; }
+  .wrap { padding:24px 28px; display:grid; gap:20px; grid-template-columns:repeat(2,1fr); max-width:1400px; }
+  .card { background:var(--card); border:1px solid var(--grid); border-radius:10px; padding:16px 18px; }
+  .card h2 { margin:0 0 12px; font-size:14px; font-weight:600; color:var(--fg); }
+  .full { grid-column:1 / -1; }
+  .kpis { display:flex; gap:24px; flex-wrap:wrap; }
+  .kpi { background:var(--card); border:1px solid var(--grid); border-radius:10px; padding:12px 18px; min-width:150px; }
+  .kpi .v { font-size:26px; font-weight:700; color:var(--acc); } .kpi .l { font-size:12px; color:var(--mut); margin-top:2px; }
+  canvas { max-height:300px; }
+  .status { font-size:12px; color:var(--mut); }
+  .win { color:#3fb950; } .loss { color:#f85149; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:right; padding:6px 10px; border-bottom:1px solid var(--grid); } th:first-child,td:first-child{text-align:left;}
+</style>
+</head>
+<body>
+<header>
+  <h1>SSWM — Selective State-Space World Model · End-to-End Training</h1>
+  <div class="sub">100k Sionna channels · 5 scenes · 8× A100 (DDP + LoRA) · <span id="status" class="status">loading…</span></div>
+</header>
+
+<div class="wrap">
+  <div class="kpis full" id="kpis"></div>
+
+  <div class="card"><h2>Total loss</h2><canvas id="cTotal"></canvas></div>
+  <div class="card"><h2>Per-module losses</h2><canvas id="cModules"></canvas></div>
+  <div class="card"><h2>Channel-estimation NMSE (train, denoising)</h2><canvas id="cChan"></canvas></div>
+  <div class="card"><h2>Embedding std (collapse monitor)</h2><canvas id="cStd"></canvas></div>
+
+  <div class="card full"><h2>Channel estimation vs classical baselines (held-out, NMSE by SNR)</h2><canvas id="cSweep"></canvas></div>
+  <div class="card"><h2>World-model predictor (held-out)</h2><div id="wmTable"></div></div>
+  <div class="card"><h2>Learning rate</h2><canvas id="cLR"></canvas></div>
+</div>
+
+<script>
+const C = { acc:'#58a6ff', grn:'#3fb950', org:'#d29922', red:'#f85149', pur:'#bc8cff', mut:'#8b949e' };
+const baseOpts = (logy=false) => ({
+  responsive:true, animation:false,
+  scales:{ x:{ grid:{color:'#30363d'}, ticks:{color:'#8b949e'} },
+           y:{ type:logy?'logarithmic':'linear', grid:{color:'#30363d'}, ticks:{color:'#8b949e'} } },
+  plugins:{ legend:{ labels:{color:'#e6edf3'} } }
+});
+function line(id,datasets,logy=false){ return new Chart(document.getElementById(id),
+  {type:'line',data:{datasets},options:baseOpts(logy)}); }
+const charts = {
+  total: line('cTotal',[{label:'total',data:[],borderColor:C.acc,pointRadius:0,tension:.2}]),
+  mods: line('cModules',[
+    {label:'jepa',data:[],borderColor:C.grn,pointRadius:0,tension:.2},
+    {label:'vic',data:[],borderColor:C.org,pointRadius:0,tension:.2},
+    {label:'chan',data:[],borderColor:C.pur,pointRadius:0,tension:.2}]),
+  chan: line('cChan',[
+    {label:'SSWM chan NMSE',data:[],borderColor:C.acc,pointRadius:0,tension:.2},
+    {label:'LS NMSE',data:[],borderColor:C.mut,borderDash:[5,5],pointRadius:0,tension:.2}],true),
+  std: line('cStd',[
+    {label:'pred_std',data:[],borderColor:C.acc,pointRadius:0,tension:.2},
+    {label:'target_std',data:[],borderColor:C.org,pointRadius:0,tension:.2}]),
+  lr: line('cLR',[{label:'lr',data:[],borderColor:C.pur,pointRadius:0,tension:.2}]),
+};
+let sweepChart=null;
+
+function kpi(v,l,cls=''){ return `<div class="kpi"><div class="v ${cls}">${v}</div><div class="l">${l}</div></div>`; }
+
+async function refresh(){
+  let hist=[];
+  try { hist = await (await fetch('metrics.json?_='+Date.now())).json(); } catch(e){}
+  if(hist.length){
+    const last=hist[hist.length-1];
+    document.getElementById('status').textContent =
+      `step ${last.step} · ${(last.elapsed||0).toFixed(0)}s · ${hist.length} points`;
+    const X=hist.map(h=>h.step);
+    const set=(c,key)=>{ c.data.labels=X; };
+    charts.total.data.labels=X; charts.total.data.datasets[0].data=hist.map(h=>h.total); charts.total.update();
+    charts.mods.data.labels=X;
+    charts.mods.data.datasets[0].data=hist.map(h=>h.jepa);
+    charts.mods.data.datasets[1].data=hist.map(h=>h.vic);
+    charts.mods.data.datasets[2].data=hist.map(h=>h.chan); charts.mods.update();
+    charts.chan.data.labels=X;
+    charts.chan.data.datasets[0].data=hist.map(h=>h.chan_nmse);
+    charts.chan.data.datasets[1].data=hist.map(h=>h.ls_nmse); charts.chan.update();
+    charts.std.data.labels=X;
+    charts.std.data.datasets[0].data=hist.map(h=>h.pred_std);
+    charts.std.data.datasets[1].data=hist.map(h=>h.target_std); charts.std.update();
+    charts.lr.data.labels=X; charts.lr.data.datasets[0].data=hist.map(h=>h.lr); charts.lr.update();
+    document.getElementById('kpis').innerHTML =
+      kpi(last.total.toFixed(4),'total loss') +
+      kpi(last.jepa.toFixed(4),'JEPA loss') +
+      kpi(last.chan_nmse.toFixed(4),'channel NMSE') +
+      kpi(last.pred_std.toFixed(3),'pred std (>0 ok)') +
+      kpi(last.step,'step');
+  }
+  let ev=null;
+  try { ev = await (await fetch('eval.json?_='+Date.now())).json(); } catch(e){}
+  if(ev){
+    const snrs=Object.keys(ev.channel_sweep);
+    const g=k=>snrs.map(s=>ev.channel_sweep[s][k]);
+    const ds=[
+      {label:'LS',data:g('ls'),backgroundColor:C.mut},
+      {label:'MMSE',data:g('mmse'),backgroundColor:C.org},
+      {label:'SSWM',data:g('sswm'),backgroundColor:C.acc}];
+    if(sweepChart) sweepChart.destroy();
+    sweepChart=new Chart(document.getElementById('cSweep'),{type:'bar',
+      data:{labels:snrs.map(s=>s+' dB'),datasets:ds},
+      options:{...baseOpts(true),scales:{...baseOpts(true).scales}}});
+    const r=ev.pers_nmse/Math.max(ev.pred_nmse,1e-9);
+    document.getElementById('wmTable').innerHTML=
+      `<table><tr><th>quantity</th><th>NMSE</th></tr>
+       <tr><td>predictor</td><td>${ev.pred_nmse.toFixed(4)}</td></tr>
+       <tr><td>persistence</td><td>${ev.pers_nmse.toFixed(4)}</td></tr>
+       <tr><td>vs persistence</td><td class="${r>1.02?'win':'loss'}">${r.toFixed(2)}×</td></tr></table>`;
+  }
+}
+refresh(); setInterval(refresh, 5000);
+</script>
+</body>
+</html>
