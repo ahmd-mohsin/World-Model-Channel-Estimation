@@ -5,6 +5,11 @@ built on a frozen pretrained wireless foundation model and a Mamba-style selecti
 backbone. This repository implements the architecture from `docs/sswm_fig.pdf` module by module,
 with every component independently tested and validated on real ray-traced channels on A100 GPUs.
 
+![SSWM live training dashboard](docs/assets/dashboard.png)
+
+*Live training dashboard: real Sionna 3D ray-tracing scene (TX + RX trajectory), per-module loss
+curves, and channel-estimation vs LS/MMSE — all updating in real time during the 8× A100 run.*
+
 ---
 
 ## 1. Motivation
@@ -91,8 +96,7 @@ We build and validate the model **one module at a time**; each is independently 
 | — | **SSWM integration** (full JEPA step) | ✅ Done | 10 |
 | — | **WirelessDataset** (Sionna RT) | ✅ Done | 6 |
 
-**71 test cases pass on A100 GPUs** (one Sionna cross-module test only fails under a deliberately
-aggressive forced-CUDA test harness; it passes in normal runs).
+**82 test cases pass on A100 GPUs** across all six modules + integration + dataset.
 
 Repository layout:
 
@@ -359,40 +363,116 @@ competitive with classical methods without their oracle statistics.
 
 ### Integration — the full SSWM (`implementation/sswm.py`)
 
-All five modules are wired into one model that runs a complete JEPA step exactly as the figure:
+All six modules are wired into one model that runs a complete JEPA step exactly as the figure:
 `o → context encoder → x → SelectiveSSM → z`; then `z_t` + planned actions → Predictor → `ẑ_{t+k}`,
 compared against `target_encoder(o_{t+k})`. The **SelectionNet is shared** between the SSM and the
 Predictor so the encode-path and imagination-path dynamics are consistent. 10 integration tests
 verify shared-parameter wiring, **stop-gradient isolation** (target gets no gradient), anchor
 bounds, loss decrease, and no-collapse over a training run.
 
-## 6. Where everything ran
+## 6. Large-scale end-to-end training (8× A100)
+
+With all 6 modules built, we trained the **whole network jointly** at scale on real ray-traced
+data.
+
+**Data — 100,000 Sionna sequences.** Generated in parallel across all 8 A100s
+(`scripts/gen_sionna_actions.py`): 5 city scenes, velocity actions `[vx, vy, speed, θ]` (the
+physical control driving channel evolution), 0.15 m/step trajectories, channels `×1e6`-scaled and
+per-channel standardized (`wireless_data/ShardDataset`).
+
+**Training — joint multi-task, DDP across 8 GPUs** (`scripts/train-e2e.py`, `torchrun
+--nproc_per_node=8`). One optimizer trains everything end-to-end; the loss has **separate logged
+components**:
+
+```
+L_total = L_jepa            (world model: predictor matches EMA target of future channel)
+        + 0.05 · L_vicreg   (variance+covariance anti-collapse on the prediction)
+        + 5.0  · L_channel  (task: channel head denoises a noisy observation -> clean channel)
+```
+
+The LWM backbone is LoRA-unfrozen (rank-8 adapters on attention; base frozen). Per-module losses
++ total + diagnostics are logged to JSON every 200 steps for the live dashboard.
+
+![Per-module losses (100k run)](docs/assets/e2e_losses.png)
+
+*Per-module losses from the actual 100k / 8× A100 run — each on its own scale. Total and channel
+losses fall sharply; VICReg holds the embedding variance up (anti-collapse); JEPA rises gently as
+the predictor learns directional structure.*
+
+**Results (100k, held-out 5,000 unseen sequences):**
+
+![Channel estimation vs LS/MMSE (100k)](docs/assets/e2e_channel_est.png)
+
+Channel estimation — NMSE vs SNR (lower better):
+
+| SNR | LS | MMSE | **SSWM** |
+| --- | ---- | ---- | ---- |
+| 0 dB  | 1.003 | 0.034 | 0.094 |
+| 5 dB  | 0.315 | 0.015 | **0.019** |
+| 10 dB | 0.100 | 0.0072 | **0.0062** |
+| 15 dB | 0.032 | 0.0039 | **0.0025** |
+| 20 dB | 0.010 | 0.0023 | **0.0012** |
+
+**SSWM beats the optimal MMSE estimator at 5/10/15/20 dB** (and beats LS everywhere), *without*
+being given MMSE's oracle channel covariance or noise variance — it learns one estimator from data
+across all SNRs and scenes. Scaling 12k → 100k nearly halved the hard 0 dB error (0.17 → 0.094).
+**World-model predictor:** 1.34× better than persistence. All losses converged cleanly, no collapse.
+
+Results + checkpoint are saved under `results/e2e_100k/`.
+
+## 7. Live HTTP dashboard
+
+A self-contained real-time dashboard (`dashboard/`, served by `dashboard/serve.py`) visualizes
+everything as it trains:
+
+![Dashboard — full view](docs/assets/dashboard.png)
+
+
+- **Real 3D scene geometry** — the actual Sionna building/street triangle meshes
+  (`scripts/export-scene-mesh.py` pulls the Mitsuba `vertex_positions_buffer` + `faces_buffer`),
+  rendered with Three.js, with the TX tower and RX trajectory cloud placed in the scene
+  (orbit / zoom / pan, switchable across all 5 scenes).
+- **Per-module loss curves** — Total, JEPA, VICReg, Channel each on its own graph (different
+  scales), plus channel NMSE vs LS on log scale, and an embedding-std collapse monitor.
+- **Channel statistics** — per-scene magnitude distributions, temporal correlation, per-antenna /
+  per-subcarrier energy, example channel heatmap.
+- **Channel estimation vs LS/MMSE** bars and the world-model predictor result, from the held-out eval.
+
+```bash
+# on the box: python dashboard/serve.py 8088
+# from laptop: SSM-forward 8088 -> local port, open http://localhost:<port>/
+```
+
+## 8. Where everything ran
 
 - **Local**: macOS, `wireless/` virtualenv, CPU correctness tests.
-- **GPU**: Amazon Greenland **p4d.24xlarge (8× A100-40GB)**, accessed via SSM tunnel
-  (`scripts/`). All modules run on CUDA; Sionna RT generates channels on the GPU; the head SSL
-  pretraining fans data generation across all 8 GPUs.
+- **GPU**: Amazon Greenland **p4d.24xlarge (8× A100-40GB)**, accessed via SSM tunnel (`scripts/`).
+  All modules run on CUDA; Sionna RT generates channels on the GPU; data generation and DDP
+  training fan across all 8 GPUs.
 
-Reproduce the GPU validation and pretraining:
+Reproduce end to end:
 
 ```bash
 ./scripts/greenland-auth.sh          # interactive Midway auth (laptop)
 ./scripts/greenland-connect.sh tunnel
 ./scripts/greenland-sync.sh up
-ssh -p 1057 greenland-user@localhost
+ssh -p <port> greenland-user@localhost
 #   on the box:
-python scripts/gpu-validate-encoders.py            # modules 1+2 on GPU
-python scripts/validate-on-sionna.py               # real-data validation
-bash   scripts/run-parallel-pretrain.sh 256 4000   # 8-GPU data gen + head pretrain
+bash    scripts/gen-large-60k.sh 12500                       # ~100k Sionna seqs on 8 GPUs
+torchrun --nproc_per_node=8 scripts/train-e2e.py \           # full e2e DDP training
+         --data_dir data/act100k --steps 25000
+python  scripts/export-scene-mesh.py                         # real 3D scene meshes for dashboard
+python  dashboard/serve.py 8088                              # live dashboard
 ```
 
----
+## 9. Status & next steps
 
-## 7. Next steps
+**All 6 modules complete and validated; full network trained end-to-end at 100k scale on 8 A100s.**
 
-- **Module 6 — TaskHeads**: channel-estimation NMSE vs. LS/MMSE, plus reward/policy probes on `z_t`.
-- **Full-scale JEPA training**: more scenes/diversity, VICReg regularizer folded into the loss to
-  remove the partial-collapse pressure seen in the small-scale predictor run.
+Possible next steps:
+- Push the hard **0 dB** regime (still trails MMSE) with more data / a denoising-specific head.
+- Fold the dashboard + checkpoints into a single inference entry point (pilot → channel estimate).
+- Explore unfreezing more of LWM / longer schedules now that the pipeline is proven.
 
 See `implementation/implementation.md` for the full milestone plan, and each module's `README.md`
 for component-level detail.

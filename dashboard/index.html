@@ -74,13 +74,14 @@
     <div id="wmTable" style="margin-top:12px;"></div>
   </div>
 
-  <!-- losses -->
-  <div class="c4 card"><h2>Total loss</h2><canvas id="cTotal"></canvas></div>
-  <div class="c4 card"><h2>Per-module losses</h2><canvas id="cMods"></canvas>
-    <div class="legend"><span><span class="dot" style="background:#3fb950"></span>JEPA (world model)</span>
-      <span><span class="dot" style="background:#e3b341"></span>VICReg</span>
-      <span><span class="dot" style="background:#bc8cff"></span>Channel est.</span></div></div>
-  <div class="c4 card"><h2>Channel NMSE — SSWM vs LS (training)</h2><canvas id="cChan"></canvas></div>
+  <!-- losses: separate graphs per module (different scales) -->
+  <div class="c3 card"><h2>Total loss</h2><canvas id="cTotal"></canvas></div>
+  <div class="c3 card"><h2>JEPA loss (world model)</h2><canvas id="cJepa"></canvas></div>
+  <div class="c3 card"><h2>VICReg loss (anti-collapse)</h2><canvas id="cVic"></canvas></div>
+  <div class="c3 card"><h2>Channel loss (task)</h2><canvas id="cChanLoss"></canvas></div>
+  <div class="c6 card"><h2>Channel NMSE — SSWM vs LS (training, log scale)</h2><canvas id="cChan"></canvas>
+    <div class="legend"><span><span class="dot" style="background:#bc8cff"></span>SSWM channel NMSE</span>
+      <span><span class="dot" style="background:#7d8794"></span>LS NMSE</span></div></div>
 
   <!-- channel statistics -->
   <div class="c4 card"><h2>Channel magnitude distribution (per scene)</h2><canvas id="cMag"></canvas></div>
@@ -108,9 +109,9 @@ const L=(id,ds,logy=false)=>new Chart(document.getElementById(id),{type:'line',d
 
 const ch={
   total:L('cTotal',[{data:[],borderColor:COL.acc,pointRadius:0,tension:.25,fill:true,backgroundColor:'#58a6ff15'}]),
-  mods:L('cMods',[{data:[],borderColor:COL.grn,pointRadius:0,tension:.25},
-                  {data:[],borderColor:COL.org,pointRadius:0,tension:.25},
-                  {data:[],borderColor:COL.pur,pointRadius:0,tension:.25}]),
+  jepa:L('cJepa',[{data:[],borderColor:COL.grn,pointRadius:0,tension:.25,fill:true,backgroundColor:'#3fb95015'}]),
+  vic:L('cVic',[{data:[],borderColor:COL.org,pointRadius:0,tension:.25}]),
+  chanLoss:L('cChanLoss',[{data:[],borderColor:COL.pur,pointRadius:0,tension:.25,fill:true,backgroundColor:'#bc8cff15'}]),
   chan:L('cChan',[{data:[],borderColor:COL.pur,pointRadius:0,tension:.25},
                   {data:[],borderColor:COL.mut,borderDash:[5,4],pointRadius:0,tension:.25}],true),
   std:L('cStd',[{data:[],borderColor:COL.acc,pointRadius:0,tension:.25},
@@ -135,33 +136,59 @@ function init3d(){
   sceneGroup=new THREE.Group(); scene3.add(sceneGroup);
   (function loop(){requestAnimationFrame(loop);ctrl.update();renderer.render(scene3,cam);})();
 }
-function drawScene(s){
+// Sionna uses Z-up; three.js is Y-up. Map scene(x,y,z) -> three(x - cx, z, -(y - cy)).
+function drawScene(name){
   sceneGroup.clear();
-  const g=s.geometry; if(!g||g.error) return;
-  const mn=g.bbox_min, mx=g.bbox_max;
+  const m = meshData && meshData.scenes[name];
+  if(!m){ return; }
+  const mn=m.bbox_min, mx=m.bbox_max;
   const cx=(mn[0]+mx[0])/2, cy=(mn[1]+mx[1])/2;
-  const w=mx[0]-mn[0], h=mx[1]-mn[1];
-  // ground (footprint) -- map scene x,y to three x,z
-  const plane=new THREE.Mesh(new THREE.PlaneGeometry(w,h),
-    new THREE.MeshStandardMaterial({color:0x102015,transparent:true,opacity:0.5,side:THREE.DoubleSide}));
-  plane.rotation.x=-Math.PI/2; sceneGroup.add(plane);
-  const grid=new THREE.GridHelper(Math.max(w,h),24,0x2a3a2a,0x18241a);
-  sceneGroup.add(grid);
-  // TX
-  const tx=new THREE.Mesh(new THREE.SphereGeometry(Math.max(w,h)*0.012,16,16),
-    new THREE.MeshStandardMaterial({color:0xf85149,emissive:0x661111}));
-  tx.position.set(g.tx[0]-cx, g.tx[2], -(g.tx[1]-cy)); sceneGroup.add(tx);
-  const beam=new THREE.Mesh(new THREE.CylinderGeometry(0.5,0.5,g.tx[2],8),
-    new THREE.MeshBasicMaterial({color:0xf85149,transparent:true,opacity:.3}));
-  beam.position.set(g.tx[0]-cx,g.tx[2]/2,-(g.tx[1]-cy)); sceneGroup.add(beam);
-  // RX points
-  const pts=s.rx_positions;
+  const span=Math.max(mx[0]-mn[0], mx[1]-mn[1]);
+
+  // --- real building/street geometry from Sionna ---
+  const V=m.vertices, Fc=m.faces;
+  const pos=new Float32Array(V.length);
+  for(let i=0;i<V.length;i+=3){ pos[i]=V[i]-cx; pos[i+1]=V[i+2]; pos[i+2]=-(V[i+1]-cy); }
   const geo=new THREE.BufferGeometry();
-  const arr=new Float32Array(pts.length*3);
-  pts.forEach((p,i)=>{arr[i*3]=p[0]-cx; arr[i*3+1]=p[2]; arr[i*3+2]=-(p[1]-cy);});
-  geo.setAttribute('position',new THREE.BufferAttribute(arr,3));
-  sceneGroup.add(new THREE.Points(geo,new THREE.PointsMaterial({color:0x58a6ff,size:Math.max(w,h)*0.006})));
-  const span=Math.max(w,h); cam.position.set(0,span*0.5,span*0.7); ctrl.target.set(0,0,0);
+  geo.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  geo.setIndex(Fc);
+  geo.computeVertexNormals();
+  const mesh=new THREE.Mesh(geo,new THREE.MeshStandardMaterial({
+    color:0x9fb4c8, metalness:0.1, roughness:0.85, flatShading:true,
+    side:THREE.DoubleSide}));
+  sceneGroup.add(mesh);
+  // wireframe overlay for crisp edges
+  sceneGroup.add(new THREE.LineSegments(new THREE.WireframeGeometry(geo),
+    new THREE.LineBasicMaterial({color:0x3a4d63,transparent:true,opacity:0.25})));
+
+  // ground grid at scene floor
+  const grid=new THREE.GridHelper(span*1.1,28,0x2f4636,0x16241a);
+  grid.position.y=mn[2]; sceneGroup.add(grid);
+
+  const X=p=>p[0]-cx, Z=p=>-(p[1]-cy);
+  const txH=m.tx[2];
+  // TX tower + glowing antenna
+  const tower=new THREE.Mesh(new THREE.CylinderGeometry(span*0.004,span*0.009,txH,12),
+    new THREE.MeshStandardMaterial({color:0xf85149,emissive:0x551111}));
+  tower.position.set(X(m.tx),mn[2]+txH/2,Z(m.tx)); sceneGroup.add(tower);
+  const txTop=new THREE.Mesh(new THREE.SphereGeometry(span*0.018,18,18),
+    new THREE.MeshStandardMaterial({color:0xff8888,emissive:0xcc3333,emissiveIntensity:1.4}));
+  txTop.position.set(X(m.tx),mn[2]+txH,Z(m.tx)); sceneGroup.add(txTop);
+
+  // RX cloud
+  const rx=m.rx, arr=new Float32Array(rx.length*3);
+  rx.forEach((p,i)=>{arr[i*3]=X(p); arr[i*3+1]=p[2]; arr[i*3+2]=Z(p);});
+  const rgeo=new THREE.BufferGeometry();
+  rgeo.setAttribute('position',new THREE.BufferAttribute(arr,3));
+  sceneGroup.add(new THREE.Points(rgeo,new THREE.PointsMaterial({color:0x58a6ff,
+    size:span*0.012,sizeAttenuation:true,transparent:true,opacity:.95})));
+
+  // Zoom in: frame the active (central) part of the scene where TX/RX live, not the full bbox.
+  const r=span*0.32;
+  cam.position.set(r*0.7, r*0.8, r*1.0);
+  ctrl.target.set(0, txH*0.25, 0);
+  ctrl.minDistance=span*0.03; ctrl.maxDistance=span*1.5;
+  ctrl.update();
 }
 
 function kpi(id,v){document.getElementById(id).textContent=v;}
@@ -169,7 +196,13 @@ function kpi(id,v){document.getElementById(id).textContent=v;}
 async function jget(u){ try{return await (await fetch(u+'?_='+Date.now())).json();}catch(e){return null;} }
 
 // ---------- scenes / statistics ----------
-let scenesData=null;
+let scenesData=null, meshData=null;
+async function loadMeshes(){
+  if(meshData) return;
+  meshData=await jget('meshes.json');
+  const sel=document.getElementById('sceneSel');
+  if(meshData && sel.value) drawScene(sel.value);
+}
 async function loadScenes(){
   const s=await jget('scenes.json'); if(!s) return;
   scenesData=s;
@@ -196,7 +229,7 @@ async function loadScenes(){
 }
 function renderScene(name){
   const s=scenesData.scenes[name]; if(!s)return;
-  drawScene(s);
+  drawScene(name);
   const g=s.geometry;
   document.getElementById('sceneInfo').textContent=
     g.span?`footprint ${g.span[0].toFixed(0)}×${g.span[1].toFixed(0)} m · ${s.n_sequences} seqs · mean|H| ${s.mean_mag.toFixed(1)}`:'';
@@ -230,7 +263,9 @@ async function loadMetrics(){
     const X=hist.map(h=>h.step);
     const upd=(c,arrs)=>{c.data.labels=X;arrs.forEach((a,i)=>c.data.datasets[i].data=a);c.update();};
     upd(ch.total,[hist.map(h=>h.total)]);
-    upd(ch.mods,[hist.map(h=>h.jepa),hist.map(h=>h.vic),hist.map(h=>h.chan)]);
+    upd(ch.jepa,[hist.map(h=>h.jepa)]);
+    upd(ch.vic,[hist.map(h=>h.vic)]);
+    upd(ch.chanLoss,[hist.map(h=>h.chan)]);
     upd(ch.chan,[hist.map(h=>h.chan_nmse),hist.map(h=>h.ls_nmse)]);
     upd(ch.std,[hist.map(h=>h.pred_std),hist.map(h=>h.target_std)]);
     upd(ch.lr,[hist.map(h=>h.lr)]);
@@ -256,7 +291,7 @@ async function loadMetrics(){
 }
 
 init3d();
-loadScenes(); loadMetrics();
+loadMeshes(); loadScenes(); loadMetrics();
 setInterval(loadMetrics,5000); setInterval(loadScenes,30000);
 addEventListener('resize',()=>{const cv=document.getElementById('scene3d');
   renderer.setSize(cv.clientWidth,cv.clientHeight,false);cam.aspect=cv.clientWidth/cv.clientHeight;cam.updateProjectionMatrix();});

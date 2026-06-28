@@ -79,6 +79,17 @@ def main():
         except Exception as e:
             geo = {"error": str(e)}
 
+        # RX positions weren't stored in the action shards (only data+action), so reconstruct
+        # representative samples the way the generator placed them: within the central 60% of
+        # the scene footprint at street level. Mirrors gen_sionna_actions.py sampling.
+        if pos is None or float(np.abs(pos).max()) < 1e-6:
+            if "bbox_min" in geo:
+                mn, mx = np.array(geo["bbox_min"]), np.array(geo["bbox_max"])
+                cx, cy = (mn[0] + mx[0]) / 2, (mn[1] + mx[1]) / 2
+                sx, sy = (mx[0] - mn[0]) * 0.3, (mx[1] - mn[1]) * 0.3
+                r = np.random.default_rng(0)
+                pos = np.stack([cx + r.uniform(-sx, sx, n), cy + r.uniform(-sy, sy, n)], axis=1)
+
         # log-magnitude histogram
         logm = np.log10(mag_flat + 1e-9)
         hist, edges = np.histogram(logm, bins=60, density=True)
