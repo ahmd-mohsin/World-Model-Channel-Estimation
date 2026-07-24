@@ -4,10 +4,10 @@ import torch
 import torch.nn as nn
 
 try:
-    from ..config import SSWMConfig
+    from ..config import SSWMConfig, scale_embedding
     from ..selection_net import SelectionNet
 except ImportError:
-    from config import SSWMConfig
+    from config import SSWMConfig, scale_embedding
     from selection_net import SelectionNet
 
 
@@ -44,7 +44,7 @@ class SelectiveSSM(nn.Module):
         u = self.in_proj(torch.cat([x, a], dim=-1))
         y = self._scan(u, A, B, C, dt)
         y = self.norm(y)
-        return self.out_proj(y)
+        return scale_embedding(self.out_proj(y), self.config)
 
     def step(self, x_t: torch.Tensor, a_t: torch.Tensor, h_prev: torch.Tensor | None = None):
         A, B, C, dt = self.selection(a_t)
@@ -54,5 +54,5 @@ class SelectiveSSM(nn.Module):
         dA, dB = discretize(A, B, dt)
         h = dA * h_prev + dB * u
         y = C * h + self.D * u
-        z = self.out_proj(self.norm(y))
+        z = scale_embedding(self.out_proj(self.norm(y)), self.config)
         return z, h

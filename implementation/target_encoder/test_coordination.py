@@ -79,12 +79,12 @@ def test_target_lags_then_tracks_online():
             return (ctx(o) - tgt(o)).pow(2).mean().item()
 
     assert gap() < 1e-10
-    opt = torch.optim.SGD(ctx.trainable_parameters(), lr=0.5)
-    for _ in range(3):
-        loss = ctx(o).pow(2).mean()
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
+    # Perturb the online head directly to open a gap. (Minimizing output magnitude no longer
+    # works once embeddings are L2-normalized to a fixed radius -- the norm is constant, so
+    # that loss has ~zero gradient; perturbing weights is the scale-invariant way to move it.)
+    with torch.no_grad():
+        for p in ctx.head.parameters():
+            p.add_(torch.randn_like(p) * 0.1)
     gap_no_ema = gap()
     assert gap_no_ema > 1e-6
     prev = gap_no_ema

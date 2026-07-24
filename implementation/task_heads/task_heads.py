@@ -5,8 +5,10 @@ import torch.nn as nn
 
 try:
     from ..config import SSWMConfig
+    from .unet_head import UNetChannelHead
 except ImportError:
     from config import SSWMConfig
+    from unet_head import UNetChannelHead
 
 
 class _MLP(nn.Module):
@@ -42,30 +44,46 @@ class TaskHeads(nn.Module):
         # context (denoising prior), the obs supplies the detail to reconstruct. Predicts a
         # RESIDUAL on the observation (zero-init) -> starts at LS, learns the denoising.
         self.channel_use_obs = channel_use_obs
+        self.channel_head_type = getattr(config, "channel_head", "mlp")
         self.heads = nn.ModuleDict()
         if "channel" in heads:
-            cin = self.in_dim + (self.obs_dim if channel_use_obs else 0)
-            ch = _MLP(cin, self.obs_dim, hidden=512, depth=2)
-            if channel_use_obs:
-                nn.init.zeros_(ch.net[-1].weight); nn.init.zeros_(ch.net[-1].bias)
-            self.heads["channel"] = ch
+            if self.channel_head_type == "unet":
+                # Conv U-Net over the antenna x subcarrier grid, FiLM-conditioned on latent +
+                # noise variance. Attacks the low-SNR regime the flat MLP head loses to MMSE.
+                self.heads["channel"] = UNetChannelHead(
+                    self.in_dim, config.n_antennas, config.n_subcarriers, base=config.unet_base_ch)
+            else:
+                cin = self.in_dim + (self.obs_dim if channel_use_obs else 0)
+                ch = _MLP(cin, self.obs_dim, hidden=512, depth=2)
+                if channel_use_obs:
+                    nn.init.zeros_(ch.net[-1].weight); nn.init.zeros_(ch.net[-1].bias)
+                self.heads["channel"] = ch
         if "reward" in heads:
             self.heads["reward"] = _MLP(self.in_dim, 1, hidden=128, depth=2)
         if "policy" in heads:
             self.heads["policy"] = _MLP(self.in_dim, config.action_dim, hidden=128, depth=2)
 
-    def forward(self, z: torch.Tensor, obs: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+    def forward(self, z: torch.Tensor, obs: torch.Tensor | None = None,
+                noise_var: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
         out = {}
         for name, head in self.heads.items():
-            if name == "channel" and self.channel_use_obs:
+            if name == "channel" and self.channel_head_type == "unet":
+                grid = obs.reshape(obs.shape[0], self.config.obs_channels,
+                                   self.config.n_antennas, self.config.n_subcarriers)
+                if noise_var is None:  # infer a rough noise floor if not supplied
+                    noise_var = torch.zeros(obs.shape[0], device=obs.device)
+                est = head(grid, z, noise_var)
+                out[name] = est.reshape(obs.shape[0], -1)
+            elif name == "channel" and self.channel_use_obs:
                 o_flat = obs.reshape(obs.shape[0], -1)
                 out[name] = o_flat + head(torch.cat([z, o_flat], dim=-1))
             else:
                 out[name] = head(z)
         return out
 
-    def channel_grid(self, z: torch.Tensor, obs: torch.Tensor | None = None) -> torch.Tensor:
+    def channel_grid(self, z: torch.Tensor, obs: torch.Tensor | None = None,
+                     noise_var: torch.Tensor | None = None) -> torch.Tensor:
         """Channel estimate reshaped to (B, 2, n_antennas, n_subcarriers)."""
-        flat = self.forward(z, obs)["channel"]
+        flat = self.forward(z, obs, noise_var)["channel"]
         return flat.reshape(z.shape[0], self.config.obs_channels,
                             self.config.n_antennas, self.config.n_subcarriers)

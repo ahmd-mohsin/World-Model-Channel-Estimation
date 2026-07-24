@@ -49,30 +49,37 @@ def main():
     ap.add_argument("--bs", type=int, default=96)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--snr", type=float, default=10.0)
-    ap.add_argument("--full_finetune", action="store_true",
-                    help="fully unfreeze LWM (train all backbone weights, smaller LR) vs LoRA-only")
+    ap.add_argument("--encoder", choices=["frozen", "lora", "full"], default="lora",
+                    help="frozen LWM | LoRA adapters | full fine-tune")
+    ap.add_argument("--full_finetune", action="store_true", help="(legacy alias for --encoder full)")
     ap.add_argument("--backbone_lr_mult", type=float, default=0.1)
+    ap.add_argument("--tag", type=str, default="", help="suffix for output files (dashboard/*_TAG.json)")
+    ap.add_argument("--channel_head", choices=["mlp", "unet"], default="unet")
     args = ap.parse_args()
+    if args.full_finetune:
+        args.encoder = "full"
 
     dist.init_process_group("nccl")
     rank, world, local = dist.get_rank(), dist.get_world_size(), int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local)
     dev = f"cuda:{local}"
 
+    full = args.encoder == "full"
     cfg = SSWMConfig(n_subcarriers=32, n_antennas=8, seq_len=8, horizon_k=3,
                      embed_dim=256, action_dim=4, state_dim=64, latent_dim=256,
                      backbone="lwm", use_pretrained=True, residual_prediction=True,
-                     freeze_backbone=not args.full_finetune,
-                     lora=not args.full_finetune, lora_rank=8, lora_alpha=16)
+                     normalize_embeddings=True, channel_head=args.channel_head,
+                     freeze_backbone=not full,
+                     lora=(args.encoder == "lora"), lora_rank=8, lora_alpha=16)
     ds = ShardDataset(args.data_dir, cfg, test_frac=0.05, seed=0)
-    mode = "FULL FINE-TUNE (LWM unfrozen)" if args.full_finetune else "LoRA (LWM frozen)"
+    mode = {"frozen": "FROZEN LWM", "lora": "LoRA", "full": "FULL FINE-TUNE"}[args.encoder]
     log(f"world={world} | train {len(ds.train_idx)} | test {len(ds.test_idx)} | {mode} | scenes {ds.scenes}")
 
     m = SSWM(cfg).to(dev)
     log(f"trainable params/GPU: {sum(p.numel() for p in m.all_trainable_parameters()):,}")
     ddp = DDP(m, device_ids=[local], find_unused_parameters=True)
     params = list(m.all_trainable_parameters())
-    groups = m.param_groups(args.lr, args.backbone_lr_mult) if args.full_finetune else params
+    groups = m.param_groups(args.lr, args.backbone_lr_mult) if full else params
     opt = torch.optim.AdamW(groups, lr=args.lr, weight_decay=1e-4)
     max_lrs = [g["lr"] for g in opt.param_groups]
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=max_lrs, total_steps=args.steps, pct_start=0.05)
@@ -104,7 +111,8 @@ def main():
                 met["elapsed"] = time.time() - t0
                 met["lr"] = sched.get_last_lr()[0]
                 history.append(met)
-                (DASH / "metrics.json").write_text(json.dumps(history))
+                suf = f"_{args.tag}" if args.tag else ""
+                (DASH / f"metrics{suf}.json").write_text(json.dumps(history))
                 if step % 1000 == 0 or step == args.steps - 1:
                     log(f"step {step:5d} | total {met['total']:.4f} | jepa {met['jepa']:.4f} "
                         f"| vic {met['vic']:.4f} | chan {met['chan']:.4f} "
@@ -113,15 +121,16 @@ def main():
     dist.barrier()
     if is_main():
         m.eval()
-        evaluate(m, ds, cfg, dev)
+        suf = f"_{args.tag}" if args.tag else ""
+        evaluate(m, ds, cfg, dev, suf)
         torch.save({"model": m.state_dict(), "config": cfg.__dict__, "history": history},
-                   OUT / "sswm_e2e.pt")
-        log(f"saved -> {OUT/'sswm_e2e.pt'}")
+                   OUT / f"sswm_e2e{suf}.pt")
+        log(f"saved -> {OUT/f'sswm_e2e{suf}.pt'}")
     dist.destroy_process_group()
 
 
 @torch.no_grad()
-def evaluate(m, ds, cfg, dev):
+def evaluate(m, ds, cfg, dev, suf=""):
     o, a = ds.all("test", device=dev)
     o = o[:2000]; a = a[:2000]
     t = cfg.seq_len - 1 - cfg.horizon_k
@@ -148,18 +157,21 @@ def evaluate(m, ds, cfg, dev):
     log(f"{'SNR':>5} {'LS':>8} {'MMSE':>8} {'SSWM':>8}")
     for snr in [0, 5, 10, 15, 20]:
         Yte = add_noise(H_te, snr, generator=g)
+        # true per-sample noise variance (the U-Net head + MMSE both get this)
+        pw = H_te.pow(2).mean(dim=(1, 2, 3))
+        nv = pw / (10 ** (snr / 10))
         seq = o.clone(); seq[:, tch] = Yte
         zobs = []
         for i in range(0, seq.shape[0], 256):
             zobs.append(m.encode_sequence(seq[i:i+256], a[i:i+256])[:, tch])
         zobs = torch.cat(zobs)
-        est = m.task_heads(zobs, Yte)["channel"].reshape(H_te.shape)
+        est = m.task_heads(zobs, Yte, noise_var=nv)["channel"].reshape(H_te.shape)
         ls = nmse(ls_estimate(Yte), H_te)
         mm = nmse(mmse_estimate(Yte, H_tr, snr), H_te)
         sw = nmse(est, H_te)
         sweep[snr] = {"ls": ls, "mmse": mm, "sswm": sw}
         log(f"{snr:5.0f} {ls:8.4f} {mm:8.4f} {sw:8.4f}")
-    (DASH / "eval.json").write_text(json.dumps(
+    (DASH / f"eval{suf}.json").write_text(json.dumps(
         {"pred_nmse": pred_nmse, "pers_nmse": pers_nmse, "channel_sweep": sweep}))
 
 

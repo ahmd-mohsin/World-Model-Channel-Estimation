@@ -16,7 +16,7 @@ from implementation.task_heads import TaskHeads, add_noise, ls_estimate, mmse_es
 
 def _cfg(**kw) -> SSWMConfig:
     base = dict(n_subcarriers=16, n_antennas=8, action_dim=4,
-                embed_dim=64, latent_dim=64, use_pretrained=False)
+                embed_dim=64, latent_dim=64, use_pretrained=False, channel_head="mlp")
     base.update(kw)
     return SSWMConfig(**base)
 
@@ -122,3 +122,48 @@ def test_add_noise_respects_snr():
     hi = add_noise(H, 30.0)
     lo = add_noise(H, 0.0)
     assert (hi - H).pow(2).mean() < (lo - H).pow(2).mean()
+
+
+# ---- U-Net channel head ----
+
+def test_unet_head_shape_and_starts_at_ls():
+    cfg = _cfg(channel_head="unet")
+    th = TaskHeads(cfg, heads=("channel",))
+    z = torch.randn(4, cfg.latent_dim)
+    obs = _obs(cfg, 4)
+    nv = torch.rand(4)
+    out = th(z, obs, noise_var=nv)["channel"]
+    assert out.shape == (4, cfg.obs_channels * cfg.n_antennas * cfg.n_subcarriers)
+    # zero-init residual => starts exactly at LS (the observation)
+    assert torch.allclose(out, obs.reshape(4, -1), atol=1e-6)
+
+
+def test_unet_head_uses_noise_and_latent():
+    cfg = _cfg(channel_head="unet")
+    th = TaskHeads(cfg, heads=("channel",))
+    # perturb weights so it's no longer the zero-init identity
+    with torch.no_grad():
+        for p in th.parameters():
+            p.add_(torch.randn_like(p) * 0.05)
+    z = torch.randn(2, cfg.latent_dim); obs = _obs(cfg, 2)
+    o1 = th(z, obs, noise_var=torch.zeros(2))["channel"]
+    o2 = th(z, obs, noise_var=torch.ones(2))["channel"]
+    assert not torch.allclose(o1, o2)             # depends on noise var
+    o3 = th(torch.randn(2, cfg.latent_dim), obs, noise_var=torch.zeros(2))["channel"]
+    assert not torch.allclose(o1, o3)             # depends on latent
+
+
+def test_unet_head_overfits():
+    torch.manual_seed(0)
+    cfg = _cfg(channel_head="unet")
+    th = TaskHeads(cfg, heads=("channel",))
+    z = torch.randn(8, cfg.latent_dim); obs = _obs(cfg, 8); nv = torch.rand(8)
+    target = torch.randn(8, cfg.obs_channels * cfg.n_antennas * cfg.n_subcarriers)
+    opt = torch.optim.Adam(th.parameters(), lr=1e-2)
+    first = last = None
+    for s in range(200):
+        loss = (th(z, obs, noise_var=nv)["channel"] - target).pow(2).mean()
+        opt.zero_grad(); loss.backward(); opt.step()
+        if s == 0: first = loss.item()
+        last = loss.item()
+    assert last < first * 0.3

@@ -9,6 +9,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+def scale_embedding(x, config):
+    """Project an embedding onto a fixed-radius sphere so all module outputs share one scale.
+
+    L2-normalize the last dim then rescale to `embed_scale`. No-op when normalize_embeddings
+    is False. Import in every module that emits a pipeline embedding (x_t, z_t, ẑ, z̃).
+    """
+    if not getattr(config, "normalize_embeddings", False):
+        return x
+    import torch.nn.functional as _F
+    return _F.normalize(x, dim=-1) * config.embed_scale
+
+
 @dataclass
 class SSWMConfig:
     # ---- channel observation geometry ----
@@ -27,6 +39,21 @@ class SSWMConfig:
     embed_dim: int = 256             # x_t / z_t / z̃ dimensionality (pipeline-wide)
     state_dim: int = 64              # SSM hidden state size (diagonal)
     latent_dim: int = 256            # SSM output latent (kept == embed_dim by default)
+
+    # ---- embedding scale contract ----
+    # Every module that emits a pipeline embedding (x_t, z_t, ẑ, z̃) L2-normalizes its output
+    # to this fixed radius, so all module boundaries live at the SAME magnitude. Removes the
+    # scale drift (e.g. pred_std 2.4 vs target_std 5.4) that made JEPA MSE/NMSE unreliable.
+    normalize_embeddings: bool = True
+    embed_scale: float = 16.0        # sqrt(embed_dim=256) -> unit-RMS features at this radius
+
+    # ---- TaskHeads / channel head ----
+    # "mlp"  : flat MLP on obs+latent (baseline).
+    # "unet" : conv U-Net over the antenna x subcarrier grid, FiLM-conditioned on the latent and
+    #          on the noise variance (leveling the field with MMSE, which gets the noise power).
+    #          Attacks the low-SNR (0 dB) regime where the MLP head loses to MMSE.
+    channel_head: str = "unet"
+    unet_base_ch: int = 48           # base conv width of the U-Net
 
     # ---- SelectionNet (input-dependent SSM params A,B,C,Δ from actions) ----
     selection_hidden: int = 128      # hidden width of the SelectionNet trunk

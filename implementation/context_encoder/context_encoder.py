@@ -4,10 +4,10 @@ import torch
 import torch.nn as nn
 
 try:
-    from ..config import SSWMConfig
+    from ..config import SSWMConfig, scale_embedding
     from .backbones import build_backbone
 except ImportError:
-    from config import SSWMConfig
+    from config import SSWMConfig, scale_embedding
     from backbones import build_backbone
 
 
@@ -81,4 +81,5 @@ class ContextEncoder(nn.Module):
         tokens = self.backbone(x)
         pooled = tokens.mean(dim=1)
         x = self.head(pooled)
+        x = scale_embedding(x, self.config)      # unit-scale embedding contract
         return x.reshape(b, t, self.config.embed_dim)

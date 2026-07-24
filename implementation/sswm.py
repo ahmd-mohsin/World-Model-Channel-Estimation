@@ -19,7 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 try:
-    from .config import SSWMConfig
+    from .config import SSWMConfig, scale_embedding
     from .context_encoder import ContextEncoder
     from .target_encoder import TargetEncoder
     from .selection_net import SelectionNet
@@ -27,7 +27,7 @@ try:
     from .predictor import Predictor
     from .task_heads import TaskHeads
 except ImportError:
-    from config import SSWMConfig
+    from config import SSWMConfig, scale_embedding
     from context_encoder import ContextEncoder
     from target_encoder import TargetEncoder
     from selection_net import SelectionNet
@@ -87,6 +87,9 @@ class SSWM(nn.Module):
             z_hat = z_present + delta
         else:
             z_hat = delta
+        # Finalize the prediction onto the same embedding scale as z_tilde (residual sum can
+        # drift off the sphere; this restores the unit-scale contract before the JEPA loss).
+        z_hat = scale_embedding(z_hat, self.config)
 
         if z_hat.shape != z_tilde.shape:
             raise RuntimeError(f"predictor/target shape mismatch: {z_hat.shape} vs {z_tilde.shape}")
@@ -128,6 +131,7 @@ class SSWM(nn.Module):
             z_hat = z_present + delta
         else:
             z_hat = delta
+        z_hat = scale_embedding(z_hat, cfg)      # unit-scale contract before losses
         jepa = F.mse_loss(z_hat, z_tilde) + 0.05 * (1.0 - F.cosine_similarity(z_hat, z_tilde, -1)).mean()
 
         # --- VICReg anti-collapse on z_hat ---
@@ -147,7 +151,7 @@ class SSWM(nn.Module):
         Y = H_clean + noise * noise_p.sqrt()
         seq_noisy = o.clone(); seq_noisy[:, anchor] = Y
         z_obs = self.encode_sequence(seq_noisy, a)[:, anchor]
-        est = self.task_heads(z_obs, Y)["channel"]
+        est = self.task_heads(z_obs, Y, noise_var=noise_p.reshape(-1))["channel"]
         chan = F.mse_loss(est, H_clean.reshape(H_clean.shape[0], -1))
 
         total = w_jepa * jepa + w_vic * vic + w_chan * chan
