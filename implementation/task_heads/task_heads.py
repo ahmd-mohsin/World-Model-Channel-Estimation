@@ -45,13 +45,20 @@ class TaskHeads(nn.Module):
         # RESIDUAL on the observation (zero-init) -> starts at LS, learns the denoising.
         self.channel_use_obs = channel_use_obs
         self.channel_head_type = getattr(config, "channel_head", "mlp")
+        self.predictive = getattr(config, "predictive_estimation", False)
         self.heads = nn.ModuleDict()
         if "channel" in heads:
             if self.channel_head_type == "unet":
                 # Conv U-Net over the antenna x subcarrier grid, FiLM-conditioned on latent +
                 # noise variance. Attacks the low-SNR regime the flat MLP head loses to MMSE.
+                # With predictive_estimation, it also fuses a world-model PRIOR channel via a
+                # learned Kalman gain (temporal info a single-snapshot U-Net cannot have).
                 self.heads["channel"] = UNetChannelHead(
-                    self.in_dim, config.n_antennas, config.n_subcarriers, base=config.unet_base_ch)
+                    self.in_dim, config.n_antennas, config.n_subcarriers,
+                    base=config.unet_base_ch, use_prior=self.predictive)
+                if self.predictive:
+                    # decode a world-model prior latent into a channel-space prior grid
+                    self.prior_decoder = _MLP(self.in_dim, self.obs_dim, hidden=512, depth=2)
             else:
                 cin = self.in_dim + (self.obs_dim if channel_use_obs else 0)
                 ch = _MLP(cin, self.obs_dim, hidden=512, depth=2)
@@ -64,7 +71,8 @@ class TaskHeads(nn.Module):
             self.heads["policy"] = _MLP(self.in_dim, config.action_dim, hidden=128, depth=2)
 
     def forward(self, z: torch.Tensor, obs: torch.Tensor | None = None,
-                noise_var: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+                noise_var: torch.Tensor | None = None,
+                prior_latent: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
         out = {}
         for name, head in self.heads.items():
             if name == "channel" and self.channel_head_type == "unet":
@@ -72,7 +80,15 @@ class TaskHeads(nn.Module):
                                    self.config.n_antennas, self.config.n_subcarriers)
                 if noise_var is None:  # infer a rough noise floor if not supplied
                     noise_var = torch.zeros(obs.shape[0], device=obs.device)
-                est = head(grid, z, noise_var)
+                prior_grid = None
+                if self.predictive:
+                    # world-model prior for the CURRENT channel, decoded from the predicted
+                    # prior latent (falls back to the obs-latent z when no prediction supplied)
+                    pl = prior_latent if prior_latent is not None else z
+                    prior_grid = self.prior_decoder(pl).reshape(
+                        obs.shape[0], self.config.obs_channels,
+                        self.config.n_antennas, self.config.n_subcarriers)
+                est = head(grid, z, noise_var, prior=prior_grid)
                 out[name] = est.reshape(obs.shape[0], -1)
             elif name == "channel" and self.channel_use_obs:
                 o_flat = obs.reshape(obs.shape[0], -1)

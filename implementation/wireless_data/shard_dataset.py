@@ -22,7 +22,8 @@ class ShardDataset:
     Actions are standardized too. Exposes a deterministic train/test split.
     """
 
-    def __init__(self, data_dir: str, config: SSWMConfig, test_frac: float = 0.1, seed: int = 0):
+    def __init__(self, data_dir: str, config: SSWMConfig, test_frac: float = 0.1, seed: int = 0,
+                 holdout_scene: str | None = None):
         files = sorted(glob.glob(f"{data_dir}/shard_*.pt"))
         if not files:
             raise FileNotFoundError(f"no shards in {data_dir}")
@@ -30,14 +31,25 @@ class ShardDataset:
         self.data = torch.cat([s["data"] for s in shards], 0)        # (N,T,2,ant,sub)
         self.action = torch.cat([s["action"] for s in shards], 0).float()
         self.scenes = [s.get("scene", "?") for s in shards]
+        # per-sample scene label (data is concatenated per-sample, scenes are per-shard)
+        self.sample_scene = [s.get("scene", "?") for s in shards for _ in range(s["data"].shape[0])]
         self.config = config
+        self.holdout_scene = holdout_scene
 
         n = self.data.shape[0]
-        g = torch.Generator().manual_seed(seed)
-        perm = torch.randperm(n, generator=g)
-        n_test = max(128, int(n * test_frac))
-        self.test_idx = perm[:n_test]
-        self.train_idx = perm[n_test:]
+        if holdout_scene is not None:
+            # OOD split: the held-out scene is the ENTIRE test set; train on all other scenes.
+            is_holdout = torch.tensor([sc == holdout_scene for sc in self.sample_scene])
+            if is_holdout.sum() == 0:
+                raise ValueError(f"holdout scene {holdout_scene!r} not present; have {set(self.scenes)}")
+            self.test_idx = torch.nonzero(is_holdout, as_tuple=True)[0]
+            self.train_idx = torch.nonzero(~is_holdout, as_tuple=True)[0]
+        else:
+            g = torch.Generator().manual_seed(seed)
+            perm = torch.randperm(n, generator=g)
+            n_test = max(128, int(n * test_frac))
+            self.test_idx = perm[:n_test]
+            self.train_idx = perm[n_test:]
 
         # standardization stats from TRAIN only (per real/imag plane, broadcast over ant/sub)
         tr = self.data[self.train_idx]

@@ -45,14 +45,23 @@ def log(*a):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_dir", required=True)
+    ap.add_argument("--holdout_scene", type=str, default=None,
+                    help="OOD: hold out this scene entirely as the test set (train on the rest)")
     ap.add_argument("--steps", type=int, default=30000)
     ap.add_argument("--bs", type=int, default=96)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--snr", type=float, default=10.0)
+    ap.add_argument("--snr_range", type=float, nargs=2, default=[0.0, 20.0],
+                    help="train channel head over this SNR range (per-sample) so it generalizes")
+    ap.add_argument("--horizon_range", type=int, nargs=2, default=None,
+                    help="train predictor over this horizon range k (per-step); None = fixed horizon_k")
     ap.add_argument("--encoder", choices=["frozen", "lora", "full"], default="lora",
                     help="frozen LWM | LoRA adapters | full fine-tune")
     ap.add_argument("--full_finetune", action="store_true", help="(legacy alias for --encoder full)")
     ap.add_argument("--backbone_lr_mult", type=float, default=0.1)
+    ap.add_argument("--head_lr_mult", type=float, default=3.0,
+                    help="LR multiplier for the (slow-converging conv) channel head")
+    ap.add_argument("--w_chan", type=float, default=5.0, help="channel-estimation loss weight")
     ap.add_argument("--tag", type=str, default="", help="suffix for output files (dashboard/*_TAG.json)")
     ap.add_argument("--channel_head", choices=["mlp", "unet"], default="unet")
     args = ap.parse_args()
@@ -71,15 +80,16 @@ def main():
                      normalize_embeddings=True, channel_head=args.channel_head,
                      freeze_backbone=not full,
                      lora=(args.encoder == "lora"), lora_rank=8, lora_alpha=16)
-    ds = ShardDataset(args.data_dir, cfg, test_frac=0.05, seed=0)
+    ds = ShardDataset(args.data_dir, cfg, test_frac=0.05, seed=0, holdout_scene=args.holdout_scene)
     mode = {"frozen": "FROZEN LWM", "lora": "LoRA", "full": "FULL FINE-TUNE"}[args.encoder]
     log(f"world={world} | train {len(ds.train_idx)} | test {len(ds.test_idx)} | {mode} | scenes {ds.scenes}")
 
     m = SSWM(cfg).to(dev)
     log(f"trainable params/GPU: {sum(p.numel() for p in m.all_trainable_parameters()):,}")
     ddp = DDP(m, device_ids=[local], find_unused_parameters=True)
-    params = list(m.all_trainable_parameters())
-    groups = m.param_groups(args.lr, args.backbone_lr_mult) if full else params
+    # Always use param groups so the slow-converging conv channel head gets its higher LR
+    # (head_lr_mult), regardless of encoder mode. Backbone group only carries weight when unfrozen.
+    groups = m.param_groups(args.lr, args.backbone_lr_mult, args.head_lr_mult)
     opt = torch.optim.AdamW(groups, lr=args.lr, weight_decay=1e-4)
     max_lrs = [g["lr"] for g in opt.param_groups]
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=max_lrs, total_steps=args.steps, pct_start=0.05)
@@ -95,10 +105,12 @@ def main():
     for step in range(args.steps):
         o, a = ds.batch(args.bs, "train", rng=rng, device=dev)
         # Route through the DDP wrapper (loss=True) so gradient all-reduce hooks fire.
-        total, met = ddp(o, a, loss=True, snr_db=args.snr, noise_gen=ng)
+        total, met = ddp(o, a, loss=True, snr_db=args.snr, noise_gen=ng, w_chan=args.w_chan,
+                         snr_range=tuple(args.snr_range),
+                         horizon_range=tuple(args.horizon_range) if args.horizon_range else None)
         opt.zero_grad()
         total.backward()
-        torch.nn.utils.clip_grad_norm_(params, 1.0)
+        torch.nn.utils.clip_grad_norm_(m.all_trainable_parameters(), 1.0)
         opt.step(); sched.step()
         m.update_target()
         if step % 200 == 0 or step == args.steps - 1:

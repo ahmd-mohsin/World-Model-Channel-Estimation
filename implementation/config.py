@@ -54,6 +54,11 @@ class SSWMConfig:
     #          Attacks the low-SNR (0 dB) regime where the MLP head loses to MMSE.
     channel_head: str = "unet"
     unet_base_ch: int = 48           # base conv width of the U-Net
+    # Predictive (Kalman-style) estimation: fuse the noisy observation with a world-model PRIOR
+    # for the current channel (predicted from history y_<t,a_<t), via a learned gain. This makes
+    # estimation DEPEND on the world model — information a single-snapshot supervised U-Net cannot
+    # have. When True, TaskHeads consumes an extra prior-channel input channel.
+    predictive_estimation: bool = True
 
     # ---- SelectionNet (input-dependent SSM params A,B,C,Δ from actions) ----
     selection_hidden: int = 128      # hidden width of the SelectionNet trunk
@@ -109,6 +114,10 @@ class SSWMConfig:
     # (residual=0) is the prior. Without this, predicting ẑ from scratch loses to persistence
     # on slowly-varying channels (measured: NMSE 0.99 vs 0.14 across multi-scene data).
     residual_prediction: bool = True
+    # Warm-start the predictor's recurrent state from the SSM's history-carrying hidden state at
+    # the anchor (real temporal memory) instead of a projection of the single anchor latent.
+    # Aimed at beating the linear AR(1) baseline, which uses the full sequence.
+    predictor_warm_start: bool = True
 
     # ---- EMA target encoder ----
     ema_momentum: float = 0.996

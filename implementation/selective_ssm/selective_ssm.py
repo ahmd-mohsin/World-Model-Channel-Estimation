@@ -28,20 +28,28 @@ class SelectiveSSM(nn.Module):
         self.out_proj = nn.Linear(d, config.latent_dim)
         self.norm = nn.LayerNorm(d)
 
-    def _scan(self, u, A, B, C, dt):
+    def _scan(self, u, A, B, C, dt, return_states=False):
         b, t, d = u.shape
         dA, dB = discretize(A, B, dt)
         h = torch.zeros(b, d, device=u.device, dtype=u.dtype)
-        ys = []
+        ys, hs = [], []
         for i in range(t):
             h = dA[:, i] * h + dB[:, i] * u[:, i]
             ys.append(C[:, i] * h + self.D * u[:, i])
+            if return_states:
+                hs.append(h)
         y = torch.stack(ys, dim=1)
+        if return_states:
+            return y, torch.stack(hs, dim=1)   # (B,T,d) hidden states
         return y
 
-    def forward(self, x: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, a: torch.Tensor, return_states: bool = False):
         A, B, C, dt = self.selection(a)
         u = self.in_proj(torch.cat([x, a], dim=-1))
+        if return_states:
+            y, states = self._scan(u, A, B, C, dt, return_states=True)
+            z = scale_embedding(self.out_proj(self.norm(y)), self.config)
+            return z, states
         y = self._scan(u, A, B, C, dt)
         y = self.norm(y)
         return scale_embedding(self.out_proj(y), self.config)

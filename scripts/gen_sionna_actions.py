@@ -20,9 +20,10 @@ def main():
     ap.add_argument("--scene", type=str, required=True)
     ap.add_argument("--out", type=str, required=True)
     ap.add_argument("--step", type=float, default=0.05)   # metres/step (~0.6 lambda @3.5GHz)
+    ap.add_argument("--seq_len", type=int, default=8)     # sequence length T
     args = ap.parse_args()
 
-    cfg = SSWMConfig(n_subcarriers=32, n_antennas=8, seq_len=8, horizon_k=3, use_pretrained=False)
+    cfg = SSWMConfig(n_subcarriers=32, n_antennas=8, seq_len=args.seq_len, horizon_k=3, use_pretrained=False)
     import drjit as dr
     import sionna.rt as rt
 

@@ -41,11 +41,15 @@ class Predictor(nn.Module):
             nn.init.zeros_(self.out_proj.bias)
         self._use_out_norm = not config.residual_prediction
 
-    def forward(self, z_t: torch.Tensor, planned_acts: torch.Tensor) -> torch.Tensor:
+    def forward(self, z_t: torch.Tensor, planned_acts: torch.Tensor,
+                h0: torch.Tensor | None = None) -> torch.Tensor:
         if planned_acts.dim() != 3:
             raise ValueError(f"planned_acts must be (B, k, action_dim), got {tuple(planned_acts.shape)}")
         b, k, _ = planned_acts.shape
-        h = self.z_to_state(z_t)
+        # Warm-start the recurrent state from the SSM's history-carrying state h0 when provided,
+        # so the predictor has real temporal memory (not just a projection of the single anchor
+        # latent z_t). Falls back to z_to_state(z_t) for backward compatibility.
+        h = h0 if h0 is not None else self.z_to_state(z_t)
         if k == 0:
             return self.out_proj(self.norm(h) if self._use_out_norm else h)
         for j in range(k):

@@ -50,10 +50,14 @@ class SSWM(nn.Module):
         # separately so they don't perturb the self-supervised world-model objective.
         self.task_heads = TaskHeads(config, in_dim=config.latent_dim)
 
-    def encode_sequence(self, o: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
-        """o (B,T,2,Nant,Nsub), a (B,T,action_dim) -> z (B,T,latent_dim)."""
+    def encode_sequence(self, o: torch.Tensor, a: torch.Tensor, return_states: bool = False):
+        """o (B,T,2,Nant,Nsub), a (B,T,action_dim) -> z (B,T,latent_dim).
+
+        return_states=True also returns the SSM hidden-state sequence (B,T,state_dim) so the
+        predictor can warm-start from history instead of a single anchor latent.
+        """
         x = self.context_encoder(o)
-        return self.ssm(x, a)
+        return self.ssm(x, a, return_states=return_states)
 
     def forward(self, o: torch.Tensor, a: torch.Tensor, anchor: int | None = None,
                 loss: bool = False, **loss_kw):
@@ -107,23 +111,36 @@ class SSWM(nn.Module):
         return loss, metrics
 
     def all_losses(self, o, a, snr_db=10.0, anchor=None,
-                   w_jepa=1.0, w_vic=0.05, w_chan=5.0, noise_gen=None):
+                   w_jepa=1.0, w_vic=0.05, w_chan=5.0, noise_gen=None, snr_range=None,
+                   horizon_range=None):
         """End-to-end multi-task loss with SEPARATE components for logging.
 
         - jepa : predictor matches EMA target of the future channel (world-model objective)
         - vic  : VICReg variance+covariance on z_hat (anti-collapse)
         - chan : channel head denoises a NOISY observation back to the clean channel (task)
         Returns (total, dict_of_component_floats).
+
+        horizon_range=(kmin,kmax): sample the prediction horizon k per-step so the predictor
+        learns multi-horizon rollout instead of a single k (fixes out-of-horizon degradation).
         """
         cfg = self.config
         t = o.shape[1]
-        k = cfg.horizon_k
+        if horizon_range is not None:
+            import random
+            k = random.randint(horizon_range[0], min(horizon_range[1], t - 2))
+        else:
+            k = cfg.horizon_k
         anchor = (t - 1 - k) if anchor is None else anchor
 
         # --- world-model (JEPA) path ---
-        z = self.encode_sequence(o, a)
-        z_t = z[:, anchor]
-        delta = self.predictor(z_t, a[:, anchor:anchor + k])
+        if getattr(cfg, "predictor_warm_start", False):
+            z, states = self.encode_sequence(o, a, return_states=True)
+            z_t = z[:, anchor]
+            delta = self.predictor(z_t, a[:, anchor:anchor + k], h0=states[:, anchor])
+        else:
+            z = self.encode_sequence(o, a)
+            z_t = z[:, anchor]
+            delta = self.predictor(z_t, a[:, anchor:anchor + k])
         z_tilde = self.target_encoder(o[:, anchor + k].unsqueeze(1))[:, 0]
         if cfg.residual_prediction:
             with torch.no_grad():
@@ -146,12 +163,41 @@ class SSWM(nn.Module):
         # --- channel-estimation task (denoise a noisy obs at the anchor) ---
         H_clean = o[:, anchor]                                   # (B,2,ant,sub)
         power = H_clean.pow(2).mean(dim=(1, 2, 3), keepdim=True)
-        noise_p = power / (10 ** (snr_db / 10))
+        # Sample a PER-SAMPLE SNR across a range so the head generalizes to all noise levels at
+        # eval (a fixed training SNR overfits to that SNR: 0.0024 @10dB but 0.39 @0dB). The head
+        # is conditioned on the resulting noise variance, so it learns SNR-adaptive denoising.
+        if snr_range is not None:
+            lo, hi = snr_range
+            snr_s = torch.empty(H_clean.shape[0], 1, 1, 1, device=H_clean.device).uniform_(lo, hi)
+            noise_p = power / (10 ** (snr_s / 10))
+        else:
+            noise_p = power / (10 ** (snr_db / 10))
         noise = torch.randn(H_clean.shape, generator=noise_gen, device=H_clean.device, dtype=H_clean.dtype)
         Y = H_clean + noise * noise_p.sqrt()
         seq_noisy = o.clone(); seq_noisy[:, anchor] = Y
         z_obs = self.encode_sequence(seq_noisy, a)[:, anchor]
-        est = self.task_heads(z_obs, Y, noise_var=noise_p.reshape(-1))["channel"]
+
+        # Predictive (Kalman) estimation: a world-model PRIOR for the current channel, predicted
+        # from CLEAN history before the anchor (y_<t, a_<t). This is temporal information a
+        # single-snapshot estimator cannot have. Requires p>=1 history steps.
+        prior_latent = None
+        p = min(2, anchor)
+        if getattr(cfg, "predictive_estimation", False) and p >= 1:
+            if getattr(cfg, "predictor_warm_start", False):
+                z_hist, states_h = self.encode_sequence(o, a, return_states=True)
+                delta_p = self.predictor(z_hist[:, anchor - p], a[:, anchor - p:anchor],
+                                         h0=states_h[:, anchor - p])
+            else:
+                z_hist = self.encode_sequence(o, a)
+                delta_p = self.predictor(z_hist[:, anchor - p], a[:, anchor - p:anchor])
+            # absolute predicted latent = present-embedding-prior + residual (as in the JEPA path)
+            if cfg.residual_prediction:
+                prior_latent = scale_embedding(z_hist[:, anchor - p] + delta_p, cfg)
+            else:
+                prior_latent = scale_embedding(delta_p, cfg)
+
+        est = self.task_heads(z_obs, Y, noise_var=noise_p.reshape(-1),
+                              prior_latent=prior_latent)["channel"]
         chan = F.mse_loss(est, H_clean.reshape(H_clean.shape[0], -1))
 
         total = w_jepa * jepa + w_vic * vic + w_chan * chan
@@ -183,20 +229,30 @@ class SSWM(nn.Module):
                     seen.add(id(p))
                     yield p
 
-    def param_groups(self, base_lr: float, backbone_lr_mult: float = 0.1):
-        """Two LR groups: pretrained LWM backbone (smaller LR) vs everything else.
+    def param_groups(self, base_lr: float, backbone_lr_mult: float = 0.1,
+                     head_lr_mult: float = 1.0):
+        """Three LR groups: LWM backbone (slow) / channel head (fast) / everything else.
 
-        Used when fully fine-tuning LWM end-to-end so the pretrained weights adapt gently while
-        fresh heads/SSM/predictor learn fast. Returns a list for torch.optim.
+        The conv U-Net channel head converges much slower than the tiny MLP-equivalents, so it
+        gets a higher LR (head_lr_mult>1) to keep up within the joint run; the pretrained LWM
+        backbone gets a smaller LR to adapt gently. Returns a list for torch.optim.
         """
         backbone_ids = {id(p) for p in self.context_encoder.backbone.parameters()}
-        bb, rest, seen = [], [], set()
+        head_ids = {id(p) for p in self.task_heads.parameters()}
+        bb, head, rest, seen = [], [], [], set()
         for p in self.all_trainable_parameters():
             if id(p) in seen:
                 continue
             seen.add(id(p))
-            (bb if id(p) in backbone_ids else rest).append(p)
+            if id(p) in backbone_ids:
+                bb.append(p)
+            elif id(p) in head_ids:
+                head.append(p)
+            else:
+                rest.append(p)
         groups = [{"params": rest, "lr": base_lr}]
+        if head:
+            groups.append({"params": head, "lr": base_lr * head_lr_mult})
         if bb:
             groups.append({"params": bb, "lr": base_lr * backbone_lr_mult})
         return groups

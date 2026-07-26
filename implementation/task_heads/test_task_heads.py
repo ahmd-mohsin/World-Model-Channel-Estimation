@@ -127,15 +127,28 @@ def test_add_noise_respects_snr():
 # ---- U-Net channel head ----
 
 def test_unet_head_shape_and_starts_at_ls():
-    cfg = _cfg(channel_head="unet")
+    # Non-predictive U-Net: zero-init residual => starts exactly at LS (the observation).
+    cfg = _cfg(channel_head="unet", predictive_estimation=False)
     th = TaskHeads(cfg, heads=("channel",))
     z = torch.randn(4, cfg.latent_dim)
     obs = _obs(cfg, 4)
     nv = torch.rand(4)
     out = th(z, obs, noise_var=nv)["channel"]
     assert out.shape == (4, cfg.obs_channels * cfg.n_antennas * cfg.n_subcarriers)
-    # zero-init residual => starts exactly at LS (the observation)
     assert torch.allclose(out, obs.reshape(4, -1), atol=1e-6)
+
+
+def test_unet_head_predictive_fusion():
+    # Predictive head: output depends on the prior latent (Kalman fusion path is wired).
+    cfg = _cfg(channel_head="unet", predictive_estimation=True)
+    th = TaskHeads(cfg, heads=("channel",))
+    with torch.no_grad():
+        for p in th.parameters():
+            p.add_(torch.randn_like(p) * 0.05)
+    z = torch.randn(3, cfg.latent_dim); obs = _obs(cfg, 3); nv = torch.rand(3)
+    o1 = th(z, obs, noise_var=nv, prior_latent=torch.zeros(3, cfg.latent_dim))["channel"]
+    o2 = th(z, obs, noise_var=nv, prior_latent=torch.randn(3, cfg.latent_dim))["channel"]
+    assert not torch.allclose(o1, o2)   # the world-model prior actually influences the estimate
 
 
 def test_unet_head_uses_noise_and_latent():

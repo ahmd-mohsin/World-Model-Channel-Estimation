@@ -24,6 +24,9 @@ EXCLUDES=(
   --exclude "*.pyc"
   --exclude ".pytest_cache/"
   --exclude "*.pth"
+  --exclude "*.pt"
+  --exclude "results/"
+  --exclude "data/"
   --exclude ".DS_Store"
 )
 
