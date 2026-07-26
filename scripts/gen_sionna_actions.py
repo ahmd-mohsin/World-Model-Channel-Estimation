@@ -21,6 +21,8 @@ def main():
     ap.add_argument("--out", type=str, required=True)
     ap.add_argument("--step", type=float, default=0.05)   # metres/step (~0.6 lambda @3.5GHz)
     ap.add_argument("--seq_len", type=int, default=8)     # sequence length T
+    ap.add_argument("--speed_lo", type=float, default=0.5)  # per-sequence speed multiplier range
+    ap.add_argument("--speed_hi", type=float, default=1.5)  # widen to stress under-represented dynamics
     args = ap.parse_args()
 
     cfg = SSWMConfig(n_subcarriers=32, n_antennas=8, seq_len=args.seq_len, horizon_k=3, use_pretrained=False)
@@ -60,7 +62,7 @@ def main():
         tries += 1
         start = np.array([cx + rng.uniform(-span_x, span_x), cy + rng.uniform(-span_y, span_y), 1.5])
         theta = rng.uniform(0, 2 * np.pi)
-        speed = rng.uniform(0.5, 1.5)                      # per-sequence speed multiplier
+        speed = rng.uniform(args.speed_lo, args.speed_hi)  # per-sequence speed multiplier
         vx, vy = np.cos(theta) * speed, np.sin(theta) * speed
         d = np.array([vx, vy, 0.0]) * args.step
         frames = [chan(start + d * t) for t in range(cfg.seq_len)]

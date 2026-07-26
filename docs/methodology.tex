@@ -4,7 +4,6 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{hyperref}
-\usepackage{xcolor}
 \usepackage{enumitem}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
@@ -19,12 +18,14 @@
 \newcommand{\av}{\mathbf{a}}
 \newcommand{\hv}{\mathbf{h}}
 \newcommand{\uv}{\mathbf{u}}
-\newcommand{\sg}{\operatorname{sg}}
+\newcommand{\bs}{\mathbf{b}}
 \newcommand{\softplus}{\operatorname{softplus}}
 \DeclareMathOperator{\NMSE}{NMSE}
+\DeclareMathOperator{\FFT}{FFT}
+\DeclareMathOperator{\IFFT}{IFFT}
 
-\title{\textbf{SSWM: A Selective State-Space World Model for\\ Wireless Channel Estimation}\\[0.4em]
-\large Detailed End-to-End Methodology}
+\title{\textbf{Beamspace Selective State-Space World Model for\\ Wireless Channel Estimation and Prediction}\\[0.4em]
+\large End-to-End Methodology}
 \author{}
 \date{}
 
@@ -32,18 +33,20 @@
 \maketitle
 
 \begin{abstract}
-We develop \textbf{SSWM}, a self-supervised \emph{world model} for MIMO-OFDM channel estimation
-and prediction. The model couples a frozen domain-pretrained wireless encoder (LWM), a Mamba-style
-\emph{selective structured state-space} (SSM) temporal backbone with action-conditioned dynamics, a
-Joint-Embedding Predictive Architecture (JEPA) objective with an EMA target and stop-gradient, and a
-noise-conditioned convolutional U-Net channel-estimation head. All components are trained end-to-end
-by Distributed Data Parallel across $8\times$ A100 GPUs on $\sim$10$^5$ ray-traced channel sequences
-generated with Sionna~RT across five city scenes. This document gives the complete mathematical
-methodology: signal model, every module's forward map and parameterization, the classical LS/MMSE
-baselines, the multi-task training objective, the embedding-scale contract, and the empirical
-protocol. On held-out channels, the learned estimator attains lower NMSE than the optimal linear
-(MMSE) estimator \emph{at every SNR from $0$ to $20$~dB}, without access to the channel covariance or
-noise power that MMSE requires.
+We develop a \emph{world model} for MIMO-OFDM channels: an action-conditioned model of channel
+dynamics whose one-step prediction serves as a temporal prior for estimation. The model operates in
+the \textbf{beamspace} (angle--delay) domain, where the channel is sparse and a compact latent is
+reconstruction-faithful; a Mamba-style \emph{selective state-space} (SSM) backbone rolls the latent
+forward under the receiver-motion action and \emph{predicts the future channel}, and a
+noise-conditioned convolutional head fuses that prediction with the noisy observation to estimate the
+current channel. Trained end-to-end by Distributed Data Parallel across $8\times$ A100 GPUs on
+$\sim$$6{\times}10^4$ ray-traced Sionna~RT channel sequences over five city scenes, the estimator
+attains lower NMSE than the optimal linear (MMSE) estimator \emph{at every SNR from $0$ to $20$~dB},
+\emph{both in-distribution and on a held-out (unseen) scene}, without access to the channel
+covariance or noise power that MMSE requires. \S\ref{sec:discarded} records, honestly, the components
+we tried and discarded on the evidence (a JEPA joint-embedding objective and a lossy pretrained
+encoder), and the controls (a same-capacity supervised baseline; an out-of-distribution split) that
+drove the final design.
 \end{abstract}
 
 \tableofcontents
@@ -52,234 +55,135 @@ noise power that MMSE requires.
 \section{Problem formulation}\label{sec:problem}
 
 \subsection{Signal model}
-Consider a single-cell MIMO-OFDM link with a base station of $N_a$ antennas and a single-antenna user
-equipment (UE), operating over $N_s$ OFDM subcarriers. The frequency-domain channel at time index
-$t$ is a complex matrix
+A single-cell MIMO-OFDM link has a base station of $N_a$ antennas and a single-antenna user
+equipment. The frequency-domain channel at time $t$ is
 \begin{equation}
-\Hc_t \in \C^{N_a \times N_s},
-\qquad
+\Hc_t \in \C^{N_a \times N_s},\qquad
 [\Hc_t]_{m,k} = \sum_{\ell=1}^{L} \alpha_{\ell}\,
-e^{\,j 2\pi \frac{m\, \phi_\ell}{N_a}}\,
-e^{-j 2\pi \frac{k\, \tau_\ell}{N_s}},
+e^{\,j 2\pi m\phi_\ell/N_a}\,e^{-j 2\pi k\tau_\ell/N_s},
 \end{equation}
-where $L$ is the number of propagation paths and $(\alpha_\ell,\phi_\ell,\tau_\ell)$ are the complex
-gain, (normalized) angle-of-departure, and delay of path $\ell$. We represent the complex channel as a
-two-plane real tensor by stacking real and imaginary parts,
-\begin{equation}
-\mathbf{o}_t \;=\; \big[\Re\{\Hc_t\};\, \Im\{\Hc_t\}\big] \in \R^{2\times N_a\times N_s}.
-\end{equation}
-
-The receiver observes a pilot-based noisy measurement. With unit-power pilots the observation reduces
-to
-\begin{equation}
-\yv_t \;=\; \Hc_t + \mathbf{n}_t, \qquad
-\mathbf{n}_t \sim \mathcal{CN}(0,\sigma^2 \mathbf{I}),
-\label{eq:obs}
-\end{equation}
-and the per-sample signal-to-noise ratio is
-$\mathrm{SNR} = 10\log_{10}\!\big(\bar P/\sigma^2\big)$ with
-$\bar P = \E\|\Hc_t\|_F^2/(N_aN_s)$.
+with $L$ paths of complex gain, angle, and delay $(\alpha_\ell,\phi_\ell,\tau_\ell)$. We stack
+real/imag parts, $\mathbf{o}_t=[\Re\Hc_t;\Im\Hc_t]\in\R^{2\times N_a\times N_s}$. The pilot
+observation is $\yv_t=\Hc_t+\mathbf{n}_t$, $\mathbf{n}_t\!\sim\!\mathcal{CN}(0,\sigma^2\mathbf I)$,
+with $\mathrm{SNR}=10\log_{10}(\bar P/\sigma^2)$, $\bar P=\E\|\Hc_t\|_F^2/(N_aN_s)$.
 
 \subsection{Actions and temporal structure}
-The UE moves; consecutive channels are temporally correlated and their evolution is driven by the
-motion. We summarize the control/context of step $t$ by an \textbf{action}
-\begin{equation}
-\av_t = [v_x,\, v_y,\, \|\mathbf{v}\|,\, \theta] \in \R^{d_a}, \qquad d_a=4,
-\end{equation}
-the receiver velocity vector, its magnitude, and heading. A trajectory yields a sequence
-$\{(\mathbf{o}_t,\av_t)\}_{t=0}^{T-1}$.
+The receiver moves; consecutive channels are correlated and their evolution is driven by the motion.
+The \textbf{action} is the velocity descriptor $\av_t=[v_x,v_y,\|\mathbf v\|,\theta]\in\R^{d_a}$,
+$d_a=4$. A trajectory yields $\{(\mathbf{o}_t,\av_t)\}_{t=0}^{T-1}$.
 
-\subsection{Two tasks}
-\begin{enumerate}[leftmargin=2em]
-\item \textbf{Channel estimation:} recover the clean $\Hc_t$ from the noisy $\yv_t$
-(Eq.~\ref{eq:obs}). Metric: normalized MSE,
-$\NMSE(\hat\Hc) = \E\|\hat\Hc-\Hc\|_F^2 / \E\|\Hc\|_F^2$.
-\item \textbf{Channel prediction (world model):} predict a future representation $k$ steps ahead from
-the current latent and the \emph{planned} actions $(\av_t,\dots,\av_{t+k-1})$, without observing the
-future.
-\end{enumerate}
+\subsection{Two tasks and metric}
+\textbf{Estimation:} recover clean $\Hc_t$ from noisy $\yv_t$. \textbf{Prediction:} forecast the
+channel $k$ steps ahead from history and planned actions, without observing the future. Metric
+throughout: $\NMSE(\hat\Hc)=\E\|\hat\Hc-\Hc\|_F^2/\E\|\Hc\|_F^2$.
 
 %==================================================================
 \section{Architecture overview}\label{sec:arch}
 
-SSWM is composed of six modules (Fig.~\ref{fig:arch}); the data flow of one training step is
+The world model is one action-conditioned dynamics model that serves both tasks:
 \begin{equation}
-\underbrace{\mathbf{o}_t \xrightarrow{f_\theta} \xv_t}_{\text{context encoder}}
-\;\;
-\underbrace{[\xv_t;\av_t] \xrightarrow{g_\psi} \zv_t}_{\text{selective SSM}}
-\;\;
-\underbrace{(\zv_t,\av_{t:t+k}) \xrightarrow{p_\phi} \hat\zv_{t+k}}_{\text{predictor}}
-\;\;\Big\|\;\;
-\underbrace{\mathbf{o}_{t+k}\xrightarrow{f_{\bar\theta}} \tilde\zv_{t+k}}_{\text{EMA target}},
+\mathbf{o}_t\!\xrightarrow{\text{2D FFT}}\!\bs_t\!\xrightarrow{f_\theta}\!\xv_t
+\!\xrightarrow{\text{selective SSM}}\!(\zv_t,\hv_t)
+\!\xrightarrow{\text{roll }k\text{ w/ }\av}\!\hat{\bs}_{t+k}\!\xrightarrow{g_\omega}\!\text{predicted channel},
 \end{equation}
-with the SSM parameters produced by a \emph{SelectionNet} $h_\eta(\av_t)$, and downstream
-\emph{TaskHeads} mapping $\zv_t$ (plus the raw observation) to a channel estimate. Training minimizes a
-JEPA prediction loss plus an anti-collapse regularizer plus the channel-estimation loss.
+and estimation is \emph{predict-then-correct}: the one-step prediction $\hat{\bs}_t$ from history is
+fused with the noisy beamspace observation by a learned gain to produce $\hat\Hc_t$. Every module is
+load-bearing for both tasks --- the encoder/SSM/predictor produce the prior, the fusion head corrects
+it --- over a single sparse, faithful representation.
 
-\begin{figure}[t]
+%==================================================================
+\section{Beamspace representation}\label{sec:beamspace}
+
+The model operates in \textbf{beamspace} rather than the raw antenna--subcarrier grid. For
+$\Hc\in\C^{N_a\times N_s}$ the orthonormal 2-D DFT
+\begin{equation}
+\bs = \FFT_{\text{sub}}\!\big(\IFFT_{\text{ant}}(\Hc)\big),\qquad
+\Hc = \FFT_{\text{ant}}\!\big(\IFFT_{\text{sub}}(\bs)\big)
+\end{equation}
+(IFFT over antennas $\to$ angle/beam; FFT over subcarriers $\to$ delay) maps paths to a few
+$(\text{angle},\text{delay})$ taps. It is orthonormal (energy-preserving, exactly invertible). On the
+Sionna channels this is strongly sparse and reconstruction-faithful (Table~\ref{tab:beam}): $90\%$ of
+the energy lies in $5.4\%$ of taps, and a $5\%$-tap approximation reaches $0.0024$ NMSE. Three
+consequences make this the right domain: (i) a \emph{compact} latent can carry the full channel, so
+estimation and prediction need not compete for capacity; (ii) receiver motion becomes a per-tap
+\emph{linear phase progression} --- scene-invariant physics that supports out-of-distribution
+generalization; (iii) a prediction made in beamspace is directly a good channel estimate, enabling
+predict-then-correct.
+
+\begin{table}[h]
 \centering
-\includegraphics[width=0.92\textwidth]{assets/architecture.png}
-\caption{SSWM architecture (context/target encoders, SelectionNet, selective SSM, predictor, JEPA
-loss with EMA + stop-gradient, task heads).}
-\label{fig:arch}
-\end{figure}
+\begin{tabular}{lcccc}
+\toprule
+kept taps & $2\%$ & $5\%$ & $10\%$ & round-trip \\
+\midrule
+reconstruction NMSE & $0.034$ & $\mathbf{0.0024}$ & $0.0010$ & $\sim\!10^{-14}$ \\
+\bottomrule
+\end{tabular}
+\caption{Beamspace sparsity/faithfulness on real Sionna channels ($90\%$ energy in $5.4\%$ of taps).}
+\label{tab:beam}
+\end{table}
 
 %==================================================================
-\section{Module 1: Context encoder}\label{sec:encoder}
+\section{Module 1: Encoder / decoder}\label{sec:encoder}
 
-\subsection{Backbone}
-The encoder maps a channel observation to a latent, $f_\theta:\R^{2\times N_a\times N_s}\!\to\R^{d}$.
-The backbone is the \textbf{Large Wireless Model} (LWM), a transformer pretrained on DeepMIMO channels
-by masked-channel modeling. LWM tokenizes the (interleaved real/imag) channel grid into
-$4\times4$ patches of length $32$, prepends a \texttt{[CLS]} token, and applies $12$ bidirectional
-self-attention layers of width $d_{\text{lwm}}\!=\!128$:
-\begin{equation}
-\mathrm{LWM}(\mathbf{o}) = \mathbf{E} \in \R^{(P+1)\times d_{\text{lwm}}},
-\end{equation}
-with $P$ patch tokens. We mean-pool the patch tokens and project:
-\begin{equation}
-\xv_t = \Pi\!\Big(\tfrac{1}{P}\textstyle\sum_{p=1}^{P}\mathbf{E}_{p}\Big),
-\qquad
-\Pi = \mathrm{Lin}\!\circ\mathrm{GELU}\!\circ\mathrm{Lin}\!\circ\mathrm{LN},
-\quad \Pi:\R^{d_{\text{lwm}}}\!\to\R^{d}.
-\end{equation}
-
-\subsection{Freezing and adaptation}
-Three regimes are supported (ablated in \S\ref{sec:results}):
-(i) \textbf{frozen} LWM (only $\Pi$ trainable);
-(ii) \textbf{LoRA}, injecting rank-$r$ adapters $\Delta W = \tfrac{\alpha}{r}\mathbf{B}\mathbf{A}$ with
-$\mathbf{A}\in\R^{r\times d_{\text{in}}},\mathbf{B}\in\R^{d_{\text{out}}\times r}$,
-$\mathbf{B}$ zero-initialized so training starts at the frozen map;
-(iii) \textbf{full fine-tune}, all LWM weights trainable with a reduced learning rate.
-
-\subsection{Gradient flow}
-LWM weights receive no gradient when frozen, but activations are \emph{not} detached: gradients still
-flow through the (frozen) transformer to any trainable adapter/stem beneath it. This is required so a
-downstream channel adapter can learn.
+The encoder is a small convolutional network over the beamspace grid,
+$f_\theta:\R^{2\times N_a\times N_s}\!\to\R^{d}$ (two conv blocks, spatial pooling, linear
+projection). A symmetric decoder $g_\omega:\R^{d}\!\to\R^{2\times N_a\times N_s}$ reconstructs the
+beamspace channel from a latent. Both are trained from scratch; because beamspace is faithful, the
+latent is reconstruction-capable (unlike the pretrained image-domain encoder of \S\ref{sec:discarded},
+which was lossy).
 
 %==================================================================
-\section{Module 2: Target encoder (EMA + stop-gradient)}\label{sec:target}
+\section{Module 2: SelectionNet (input-dependent SSM parameters)}\label{sec:selection}
 
-The target encoder $f_{\bar\theta}$ is a slow copy of the context encoder used to produce prediction
-targets. Its parameters are an exponential moving average and it receives no gradient:
-\begin{equation}
-\bar\theta \leftarrow \mu\,\bar\theta + (1-\mu)\,\theta,
-\qquad
-\tilde\zv_{t+k} = \sg\!\big(f_{\bar\theta}(\mathbf{o}_{t+k})\big),
-\label{eq:ema}
-\end{equation}
-where $\sg[\cdot]$ is the stop-gradient and $\mu\!\in\![0.996,1)$. Only the \emph{trainable}
-parameters are tracked by the EMA (the frozen LWM is identical in both copies). The EMA target plus
-stop-gradient is the standard BYOL/JEPA mechanism preventing representational collapse: without a
-moving target, minimizing $\|\zv-\tilde\zv\|$ admits the trivial constant solution.
-
-%==================================================================
-\section{Module 3: SelectionNet (input-dependent SSM parameters)}\label{sec:selection}
-
-The dynamics are made \emph{selective} (Mamba-style) by conditioning the state-space parameters on the
-action. SelectionNet $h_\eta:\R^{d_a}\!\to(\R^{n})^4$ outputs, for state dimension $n$,
+The dynamics are made \emph{selective} (Mamba-style) by conditioning the diagonal state-space
+parameters on the action. SelectionNet $h_\eta:\R^{d_a}\!\to(\R^{n})^4$ (MLP trunk, four heads)
+outputs, for state dimension $n$,
 \begin{align}
-\mathbf{s} &= \mathrm{GELU}\big(\mathrm{Lin}(\mathrm{GELU}(\mathrm{LN}(\mathrm{Lin}(\av_t))))\big),\\
-\mathbf{A}_t &= -\softplus(\mathbf{W}_A \mathbf{s} + \mathbf{b}_A) \;\prec\; \mathbf{0},
-&&\text{(stable diagonal poles)}\\
-\mathbf{B}_t &= \mathbf{W}_B \mathbf{s} + \mathbf{b}_B, \qquad
-\mathbf{C}_t = \mathbf{W}_C \mathbf{s} + \mathbf{b}_C,\\
-\bm{\Delta}_t &= \softplus(\mathbf{W}_\Delta \mathbf{s} + \mathbf{b}_\Delta) \;\succ\; \mathbf{0}.
-&&\text{(positive timescale)}
+\mathbf{A}_t &= -\softplus(\cdot)\prec\mathbf 0 \ \ \text{(stable poles)}, &
+\bm{\Delta}_t &= \softplus(\cdot)\succ\mathbf 0 \ \ \text{(positive step)}, \\
+\mathbf{B}_t &= \mathrm{Lin}(\cdot), & \mathbf{C}_t &= \mathrm{Lin}(\cdot).
 \end{align}
-The negativity of $\mathbf{A}_t$ guarantees a stable discretization for \emph{any} action
-(\S\ref{sec:ssm}); positivity of $\bm{\Delta}_t$ guarantees a valid step.
-
-\paragraph{Initialization (HiPPO/S4-style).}
-Biases are set so that at zero action the dynamics span a spread of timescales:
-\begin{equation}
-\mathbf{b}_A = \log\!\big(e^{\mathbf{a}^\star}-1\big),\;\; a^\star_i = i,\; i=1,\dots,n
-\quad(\text{so } -\mathbf{A}=\{1,\dots,n\}),
-\qquad
-\mathbf{b}_\Delta = \Delta + \log(-\!\operatorname{expm1}(-\Delta)),
-\end{equation}
-with $\Delta$ log-uniform in $[\Delta_{\min},\Delta_{\max}]=[10^{-3},10^{-1}]$ (inverse-softplus of a
-target sample). Head weights are small but nonzero so all four parameters remain genuinely
-action-dependent.
+Negativity of $\mathbf A_t$ guarantees a stable discretization for any action; positivity of
+$\bm\Delta_t$ a valid step. HiPPO/S4-style initialization spreads the timescales: the $\mathbf A$-bias
+targets $\{-1,\dots,-n\}$ and the $\bm\Delta$-bias is the inverse-softplus of a log-uniform sample in
+$[10^{-3},10^{-1}]$; head weights are small but nonzero so all four parameters stay action-dependent.
 
 %==================================================================
-\section{Module 4: Selective SSM (temporal backbone)}\label{sec:ssm}
+\section{Module 3: Selective SSM (temporal backbone)}\label{sec:ssm}
 
-\subsection{Continuous system and ZOH discretization}
-Each of the $n$ state channels is a scalar linear system $\dot h = A h + B u$, $y = C h + D u$,
-discretized per step by zero-order hold (ZOH) with step $\Delta_t$:
+Each of the $n$ diagonal state channels is a scalar system discretized by zero-order hold with step
+$\Delta_t$:
 \begin{equation}
-\bar A_t = \exp(\Delta_t A_t), \qquad
-\bar B_t = (\bar A_t - 1)\,A_t^{-1} B_t.
-\label{eq:zoh}
+\bar A_t=\exp(\Delta_t A_t)\in(0,1),\qquad \bar B_t=(\bar A_t-1)A_t^{-1}B_t,
 \end{equation}
-Since $A_t<0$, $\bar A_t=e^{\Delta_t A_t}\in(0,1)$, so the recurrence is contractive and stable for any
-action.
-
-\subsection{Recurrence}
-With input mixing $\uv_t = \mathrm{Lin}([\xv_t;\av_t]) \in \R^n$ (elementwise, diagonal state):
+stable since $A_t<0$. With input mixing $\uv_t=\mathrm{Lin}([\xv_t;\av_t])$,
 \begin{equation}
-\hv_t = \bar A_t \odot \hv_{t-1} + \bar B_t \odot \uv_t,
-\qquad
-\yv_t = \mathbf{C}_t \odot \hv_t + \mathbf{D}\odot\uv_t,
-\qquad
-\zv_t = \Pi_z\big(\mathrm{LN}(\yv_t)\big),
-\label{eq:scan}
+\hv_t=\bar A_t\odot\hv_{t-1}+\bar B_t\odot\uv_t,\qquad
+\zv_t=\mathrm{Lin}\big(\mathrm{LN}(\mathbf C_t\odot\hv_t+\mathbf D\odot\uv_t)\big).
 \end{equation}
-where $\odot$ is the Hadamard product and $\Pi_z:\R^n\!\to\R^{d}$. The baseline runs
-Eq.~\ref{eq:scan} as a sequential scan; a single-step form $\mathrm{step}(\xv_t,\av_t,\hv_{t-1})$ is
-exposed and, by construction, the full scan equals the composition of steps
-($\mathrm{forward}\equiv\mathrm{step}^{\circ T}$), which the predictor reuses.
-
-\subsection{Properties}
-The map is causal ($\zv_t$ depends only on $\{\xv_{\le t},\av_{\le t}\}$), selective (different actions
-produce different $\bar A,\bar B,\mathbf C$), and stable over long horizons.
+The scan is causal, selective, and stable over long horizons; the recurrent state $\hv_t$ is exposed
+so the predictor can warm-start from real history rather than a single latent.
 
 %==================================================================
-\section{Module 5: Predictor (imagination)}\label{sec:predictor}
+\section{Module 4: Predictor (future-channel imagination)}\label{sec:predictor}
 
-The predictor rolls the latent $k$ steps into the future \emph{using planned actions only}: the future
-is unobserved, so feeding future observations would be an information leak. The recurrent state is
-\emph{warm-started from the encoder's history}: rather than re-deriving state from the single anchor
-latent, we initialize $\hv_0^{(p)} = \hv_t^{\text{ssm}}$, the SSM hidden state at the anchor obtained
-by running the encode-path scan with state read-out (\S\ref{sec:ssm}); this gives the predictor real
-temporal memory and closes the short-horizon gap to a linear baseline (falling back to
-$\hv_0^{(p)}=\Pi_{z\to h}(\zv_t)$ when disabled). For $j=0,\dots,k-1$ with $(\mathbf A_j,\mathbf
-B_j,\mathbf C_j,\Delta_j)=h_\eta(\av_{t+j})$ (the \emph{shared} SelectionNet) and
-$\uv_j=\mathrm{Lin}(\av_{t+j})$:
+The predictor rolls the latent $k$ steps forward \emph{using planned actions only} (the future is
+unobserved), warm-started from the SSM state $\hv_t$. For $j=0,\dots,k-1$ with
+$(\mathbf A_j,\mathbf B_j,\mathbf C_j,\Delta_j)=h_\eta(\av_{t+j})$ (the \emph{shared} SelectionNet):
 \begin{equation}
-\hv_{j+1}^{(p)} = \bar A_j \odot \hv_j^{(p)} + \bar B_j \odot \uv_j,
-\qquad
-\mathbf{y}_k = \mathbf C_{k-1}\odot \hv_k^{(p)} + \mathbf D\odot\uv_{k-1}.
+\hv_{j+1}=\bar A_j\odot\hv_j+\bar B_j\odot\mathrm{Lin}(\av_{t+j}),\qquad
+\hat{\bs}_{t+k}=g_\omega\big(\mathrm{Lin}(\mathbf y_k)\big),
 \end{equation}
-\paragraph{Residual (persistence-prior) parameterization.}
-Wireless channels are strongly temporally correlated, so \emph{persistence} (predict the present) is a
-very strong baseline. We therefore predict a residual on the present target embedding,
-\begin{equation}
-\hat\zv_{t+k} = \mathcal S\!\big(\tilde\zv_t + \mathrm{Lin}(\mathbf y_k)\big),
-\qquad \tilde\zv_t = \sg\!\big(f_{\bar\theta}(\mathbf o_t)\big),
-\end{equation}
-with the output projection \textbf{zero-initialized} so that at initialization $\hat\zv_{t+k}=$
-persistence, and the model learns only the correction. $\mathcal S(\cdot)$ is the scale contract of
-\S\ref{sec:scale}.
+decoding to the \emph{future channel in beamspace}. This is a reconstruction-based world model
+(predict the future \emph{state}), not a joint-embedding one (\S\ref{sec:discarded}).
 
 \paragraph{Multi-horizon training.}
-Training at a single fixed horizon overfits to it and degrades sharply beyond it (a $k{=}3$-only
-predictor evaluated at $k{=}6$ reaches $\NMSE\,0.213$, \emph{worse} than persistence). We therefore
-sample the horizon per step, $k\sim\mathcal U\{k_{\min},\dots,k_{\max}\}=\{1,\dots,6\}$, so the
-predictor learns to roll to any horizon. The prediction loss is the JEPA term of
-\S\ref{sec:objective} at the sampled $k$.
-
-\paragraph{Evaluation and results.}
-We measure embedding-space prediction NMSE, $\E\|\hat\zv_{t+k}-\tilde\zv_{t+k}\|^2/\E\|\tilde\zv_{t+k}\|^2$,
-against two baselines: \emph{persistence} ($\hat\zv=\tilde\zv_t$) and a linear \emph{AR(1)} model
-$\hat\zv_{t+1}=\mathbf W\tilde\zv_t$ with $\mathbf W$ fit by ridge regression on the training embedding
-sequence and rolled $k$ steps. Table~\ref{tab:horizon} reports the held-out curve for the
-multi-horizon model. Multi-horizon training eliminates the out-of-horizon collapse
-($k{=}6\!:\,0.213\!\to\!0.080$, now the best of the three), and the learned nonlinear predictor
-surpasses the linear AR(1) baseline for all $k\ge 3$ with a margin that \emph{widens} with the
-horizon --- the world-model signature (linear extrapolation degrades faster than learned rollout);
-AR(1) remains marginally better only at the shortest ranges $k\in\{1,2\}$.
+Training at a single fixed horizon overfits to it and degrades beyond it (a $k{=}3$-only predictor at
+$k{=}6$ reached $0.213$ NMSE, worse than persistence). We sample $k\sim\mathcal U\{1,\dots,6\}$ per
+step. This eliminated the out-of-horizon collapse ($k{=}6:0.213\!\to\!0.080$) and the learned
+predictor beats a linear AR(1) baseline for all $k\ge3$ with a margin that \emph{widens} with horizon
+(the world-model signature); AR(1) is marginally better only at $k\in\{1,2\}$ (Table~\ref{tab:horizon}).
 
 \begin{table}[h]
 \centering
@@ -289,213 +193,153 @@ horizon $k$ & 1 & 2 & 3 & 4 & 5 & 6 \\
 \midrule
 persistence & $0.092$ & $0.089$ & $0.092$ & $0.101$ & $0.103$ & $0.098$ \\
 AR(1)       & $\mathbf{0.063}$ & $\mathbf{0.068}$ & $0.074$ & $0.080$ & $0.087$ & $0.091$ \\
-\textbf{SSWM predictor} & $0.067$ & $0.070$ & $\mathbf{0.072}$ & $\mathbf{0.074}$ & $\mathbf{0.078}$ & $\mathbf{0.080}$ \\
+\textbf{predictor} & $0.067$ & $0.070$ & $\mathbf{0.072}$ & $\mathbf{0.074}$ & $\mathbf{0.078}$ & $\mathbf{0.080}$ \\
 \bottomrule
 \end{tabular}
-\caption{Held-out embedding-space prediction NMSE vs.\ horizon (lower is better), multi-horizon
-model. SSWM beats both baselines for $k\ge3$ with an advantage over AR(1) that grows with horizon.}
+\caption{Held-out prediction NMSE vs.\ horizon (lower better). Beats both baselines for $k\ge3$.}
 \label{tab:horizon}
 \end{table}
 
 %==================================================================
-\section{Module 6: Task heads (channel estimation)}\label{sec:heads}
+\section{Module 5: Predict-then-correct estimation head}\label{sec:heads}
 
-\subsection{Why a grid-structured, noise-conditioned head}
-An MLP probe on the pooled latent cannot reconstruct the channel: the LWM latent is lossy/invariant
-(empirically, reconstructing $\Hc$ from $\zv$ gives $\NMSE\!\approx\!0.31$ at $20$~dB versus $0.005$
-from the raw observation). The channel head therefore operates on the \emph{raw grid} and predicts a
-residual on the observation, and is conditioned on the noise power (which MMSE also receives).
-
-\subsection{U-Net channel head}
-Let $\yv\in\R^{2\times N_a\times N_s}$ be the noisy observation and $\sigma^2$ the per-sample noise
-variance. Form the input by appending a broadcast noise-variance plane,
-$\tilde\yv=[\yv;\,\sigma^2\mathbf{1}]\in\R^{3\times N_a\times N_s}$. A conv encoder--decoder with skip
-connections and a bottleneck FiLM conditioned on $[\zv;\,e(\sigma^2)]$ (with $e$ a small MLP embedding)
-produces
+Estimation fuses the world-model prior with the observation, all in beamspace. Given the noisy
+beamspace observation $\bs^y=\mathrm{beam}(\yv)$, the one-step prior $\hat{\bs}_t$ predicted from
+clean history (\S\ref{sec:predictor}), and per-sample noise variance $\sigma^2$, a learned per-element
+\emph{Kalman gain} $\mathbf g\in[0,1]^{2\times N_a\times N_s}$ combines them, followed by a small conv
+refinement:
 \begin{equation}
-\hat\Hc = \yv + \mathrm{UNet}_\omega\big(\tilde\yv \,\big|\, \zv,\sigma^2\big),
-\qquad
-\text{FiLM}(\mathbf F;\mathbf c) = (1+\bm\gamma(\mathbf c))\odot\mathbf F + \bm\beta(\mathbf c).
+\mathbf g=\text{Conv}\big([\bs^y;\hat{\bs}_t;\sigma^2\mathbf 1]\big),\quad
+\hat{\bs}=\mathbf g\odot\bs^y+(1-\mathbf g)\odot\hat{\bs}_t+\text{Conv}(\cdot),\quad
+\hat\Hc=\mathrm{beam}^{-1}(\hat{\bs}).
 \end{equation}
-The final convolution is zero-initialized, so the head \textbf{starts at the LS estimate}
-($\hat\Hc=\yv$) and learns SNR-adaptive denoising. Because it is grid-structured, it exploits spatial
-(antenna$\times$subcarrier) correlation that a \emph{linear} MMSE estimator cannot capture, which is
-how it surpasses MMSE at low SNR. Auxiliary reward/policy MLP heads on $\zv$ are also provided.
+The refinement conv is zero-initialized so the head starts at the gated fusion. The gate is conditioned
+on $\sigma^2$ (which MMSE also receives), so it trusts the observation at high SNR and the prior at low
+SNR. Crucially, the prior is temporal information a single-snapshot estimator (or MMSE) cannot access.
 
 %==================================================================
 \section{Classical baselines}\label{sec:baselines}
 
-\paragraph{Least squares (LS).}
-With unit pilots the LS estimate is the observation itself, $\hat\Hc_{\text{LS}}=\yv$, with
-$\NMSE_{\text{LS}}=\sigma^2/\bar P = 10^{-\mathrm{SNR}/10}$.
+\paragraph{Least squares.} With unit pilots $\hat\Hc_{\text{LS}}=\yv$, $\NMSE_{\text{LS}}=10^{-\mathrm{SNR}/10}$.
 
-\paragraph{Linear MMSE (Wiener).}
-Vectorize $\hv=\mathrm{vec}(\Hc)\in\C^{d}$, $d=N_aN_s$. With channel covariance
-$\mathbf R = \E[\hv\hv^{H}]$ and white noise of power $\sigma^2$, the MMSE estimate minimizing
-$\E\|\hat\hv-\hv\|^2$ is the linear Wiener filter
+\paragraph{Linear MMSE (Wiener).} With $\hv=\mathrm{vec}(\Hc)$, covariance $\mathbf R=\E[\hv\hv^H]$
+(estimated from training channels) and noise $\sigma^2$,
 \begin{equation}
-\hat\hv_{\text{MMSE}} = \mathbf R\big(\mathbf R + \sigma^2 \mathbf I\big)^{-1}\yv_{\text{vec}}.
-\label{eq:mmse}
+\hat\hv_{\text{MMSE}}=\mathbf R(\mathbf R+\sigma^2\mathbf I)^{-1}\yv_{\text{vec}}.
 \end{equation}
-$\mathbf R$ is estimated from the training channels; the oracle variant uses the true (test)
-covariance. MMSE is the \emph{optimal linear} estimator and is handed both $\mathbf R$ and $\sigma^2$;
-SSWM receives neither $\mathbf R$ nor (at architecture level) any statistical prior beyond the scalar
-$\sigma^2$ fed to the head.
+MMSE is the optimal \emph{linear} estimator and is handed both $\mathbf R$ and $\sigma^2$; our model
+receives only the scalar $\sigma^2$ and no covariance.
 
-%==================================================================
-\section{Embedding-scale contract}\label{sec:scale}
-
-Distinct modules emit embeddings ($\xv_t,\zv_t,\hat\zv,\tilde\zv$) whose unconstrained magnitudes
-otherwise drift apart, making the JEPA MSE and NMSE comparisons unreliable (we observed
-$\mathrm{std}(\hat\zv)\!\approx\!2.4$ versus $\mathrm{std}(\tilde\zv)\!\approx\!5.4$). We enforce a
-common scale by projecting every emitted embedding onto a fixed-radius sphere,
-\begin{equation}
-\mathcal S(\xv) = \rho\,\frac{\xv}{\|\xv\|_2}, \qquad \rho = \sqrt{d},
-\end{equation}
-applied at the output of the context/target encoders, the SSM, and the finalized prediction. This
-places all module boundaries at identical magnitude and makes the loss geometry well-posed.
+\paragraph{Supervised control.} An \emph{identical} conv head trained supervised on $(\yv,\Hc)$ pairs
+with no world model (\S\ref{sec:results}), to isolate what the temporal prior contributes.
 
 %==================================================================
 \section{Training objective}\label{sec:objective}
 
-\subsection{JEPA prediction loss}
-Predict the future \emph{representation}, not raw pixels:
+Per-sample SNR is randomized, $s\!\sim\!\mathcal U[0,20]$~dB, so the head sees all noise levels
+(training at a fixed SNR overfits to it: $0.0024$ at $10$~dB but $0.39$ at $0$~dB). The loss combines
+future-channel prediction and channel estimation, both in beamspace / channel space:
 \begin{equation}
-\mathcal L_{\text{JEPA}}
-= \big\|\hat\zv_{t+k} - \tilde\zv_{t+k}\big\|_2^2
-+ \lambda_c\Big(1 - \cos(\hat\zv_{t+k}, \tilde\zv_{t+k})\Big),
-\quad \lambda_c=0.05,
+\mathcal L = \big\|\hat{\bs}_{t+k}-\bs_{t+k}\big\|_2^2
+\;+\; w_{\text{chan}}\,\big\|\hat\Hc_t-\Hc_t\big\|_2^2,\qquad w_{\text{chan}}=5.
 \end{equation}
-with $\tilde\zv_{t+k}$ stop-gradiented (Eq.~\ref{eq:ema}) and the horizon $k$ sampled per step
-(\S\ref{sec:predictor}). The cosine term stabilizes direction; the MSE term keeps NMSE meaningful
-(a pure-cosine loss leaves magnitude unconstrained).
-
-\subsection{Anti-collapse (VICReg) regularizer}
-On a batch of predictions $\{\hat\zv^{(i)}\}$, let $\mathbf Z\in\R^{B\times d}$ be centered. With
-$\mathrm{Cov}=\tfrac{1}{B-1}\mathbf Z^\top\mathbf Z$,
-\begin{equation}
-\mathcal L_{\text{VIC}}
-= \underbrace{\frac1d\sum_{j}\max\!\big(0,\,1-\sqrt{\mathrm{Var}(\mathbf Z_{:,j})+\epsilon}\big)}_{\text{variance}}
-+ \underbrace{\frac1d\sum_{j\neq j'}\mathrm{Cov}_{j,j'}^2}_{\text{covariance}}.
-\end{equation}
-
-\subsection{Channel-estimation loss with SNR randomization}
-The key to low-SNR generalization: draw a \emph{per-sample} SNR $s^{(i)}\!\sim\!\mathcal
-U[s_{\min},s_{\max}]=[0,20]$~dB, synthesize $\yv^{(i)}=\Hc^{(i)}+\mathbf n^{(i)}$ with
-$\sigma_i^2=\bar P_i\,10^{-s^{(i)}/10}$, re-encode the noisy sequence to obtain $\zv^{(i)}$, and
-denoise:
-\begin{equation}
-\mathcal L_{\text{chan}}
-= \frac1B\sum_i \big\|\,\hat\Hc^{(i)}(\yv^{(i)},\zv^{(i)},\sigma_i^2) - \Hc^{(i)}\big\|_F^2.
-\end{equation}
-Training at a \emph{fixed} SNR (e.g.\ $10$~dB) overfits to that SNR (yielding $\NMSE\!\approx\!0.0024$
-at $10$~dB but $0.39$ at $0$~dB); randomizing $s$ and conditioning the head on $\sigma^2$ yields an
-SNR-adaptive estimator.
-
-\subsection{Total loss and optimization}
-\begin{equation}
-\mathcal L = w_{\text{jepa}}\,\mathcal L_{\text{JEPA}}
-+ w_{\text{vic}}\,\mathcal L_{\text{VIC}}
-+ w_{\text{chan}}\,\mathcal L_{\text{chan}},
-\qquad (w_{\text{jepa}},w_{\text{vic}},w_{\text{chan}}) = (1,\,0.05,\,8).
-\end{equation}
-The optimizer (AdamW, weight decay $10^{-4}$) uses three parameter groups with a OneCycle schedule:
-LWM backbone at $0.1\,\eta$ (gentle fine-tuning), the conv channel head at $3\,\eta$ (it converges
-slower than the small MLP-scale modules), and everything else at $\eta=3\times10^{-4}$. Gradients are
-clipped to norm $1$; the EMA target is updated (Eq.~\ref{eq:ema}) after each step.
+No JEPA embedding-matching, EMA target, or anti-collapse regularizer is used --- the reconstruction
+targets are faithful and non-degenerate. AdamW (weight decay $10^{-4}$), OneCycle schedule, gradient
+clipping at norm $1$; per-sample horizon $k$ and SNR $s$.
 
 \begin{algorithm}[t]
-\caption{One SSWM training step (per DDP rank)}
+\caption{One training step (per DDP rank)}
 \begin{algorithmic}[1]
-\State sample sequence batch $\{(\mathbf o_{0:T-1},\av_{0:T-1})\}$; set anchor $t=T-1-k$
-\State $\zv_{0:T-1} \gets g_\psi(f_\theta(\mathbf o), \av)$ \Comment{encode + SSM}
-\State $\hat\zv_{t+k}\gets \mathcal S(\tilde\zv_t + p_\phi(\zv_t, \av_{t:t+k}))$ \Comment{residual predict}
-\State $\tilde\zv_{t+k}\gets \sg[f_{\bar\theta}(\mathbf o_{t+k})]$
-\State draw per-sample $s\!\sim\!\mathcal U[0,20]$dB; $\yv\gets \Hc_t+\mathbf n(s)$; $\hat\Hc\gets \yv+\mathrm{UNet}(\cdot)$
-\State $\mathcal L \gets w_{\text{jepa}}\mathcal L_{\text{JEPA}} + w_{\text{vic}}\mathcal L_{\text{VIC}} + w_{\text{chan}}\mathcal L_{\text{chan}}$
-\State backprop (DDP all-reduce), clip, AdamW step, OneCycle step
-\State $\bar\theta \gets \mu\bar\theta + (1-\mu)\theta$ \Comment{EMA target}
+\State sample $\{(\mathbf o_{0:T-1},\av_{0:T-1})\}$; per-step $k\!\sim\!\mathcal U\{1,6\}$; anchor $t=T-1-k$
+\State $\bs\gets\mathrm{beam}(\mathbf o)$; encode $\to$ SSM $\to (\zv,\hv)$
+\State $\hat{\bs}_{t+k}\gets$ roll$_k(\zv_t,\hv_t,\av_{t:t+k})$; \ \ $\mathcal L_{\text{pred}}=\|\hat{\bs}_{t+k}-\bs_{t+k}\|^2$
+\State $s\!\sim\!\mathcal U[0,20]$dB; $\yv\gets\Hc_t+\mathbf n(s)$; prior $\hat{\bs}_t\gets$ roll from history
+\State $\hat\Hc_t\gets\mathrm{beam}^{-1}(\text{gate-fuse}(\mathrm{beam}(\yv),\hat{\bs}_t,\sigma^2))$; \ $\mathcal L_{\text{chan}}=\|\hat\Hc_t-\Hc_t\|^2$
+\State $\mathcal L=\mathcal L_{\text{pred}}+w_{\text{chan}}\mathcal L_{\text{chan}}$; backprop (all-reduce), clip, step
 \end{algorithmic}
 \end{algorithm}
 
 %==================================================================
-\section{Data pipeline}\label{sec:data}
+\section{Data pipeline and systems}\label{sec:data}
 
-Channels are generated with \textbf{Sionna~RT} ray tracing across five built-in city scenes
-(\texttt{munich}, \texttt{etoile}, \texttt{florence}, \texttt{san\_francisco},
-\texttt{simple\_street\_canyon}). For each sequence a transmitter is placed near the scene centre; a
-receiver is sampled within the central footprint and moved along a straight sub-wavelength trajectory
-(step $0.15$~m $\approx\lambda$ at $3.5$~GHz), and the OFDM channel frequency response is computed per
-step via the path solver (\texttt{Paths.cfr}, max depth $3$). Sequences with no propagation paths are
-rejected. Channels are scaled by $10^6$ to match LWM's training convention and standardized per
-real/imag plane using training-set statistics; the velocity actions are standardized likewise. The
-main dataset is $\sim$10$^5$ sequences of length $T{=}8$ ($N_a{=}8$, $N_s{=}32$), generated in
-parallel across all $8$ GPUs.
-
-%==================================================================
-\section{Systems and training setup}\label{sec:systems}
-
-Training uses PyTorch DistributedDataParallel across $8\times$ NVIDIA A100-40GB (single p4d.24xlarge).
-Data generation and DDP training both fan across the $8$ GPUs; per-module and total losses plus a
-held-out channel-estimation-vs-SNR sweep are logged to JSON for a live dashboard that also renders the
-real Sionna scene meshes in 3D. Every module has unit/integration tests (shape contracts,
-stop-gradient isolation, scan$\equiv$step, scale contract, no-collapse under self-distillation), all
-passing on-device.
+Channels are generated with \textbf{Sionna~RT} across five city scenes (\texttt{munich},
+\texttt{etoile}, \texttt{florence}, \texttt{san\_francisco}, \texttt{simple\_street\_canyon}). A
+transmitter is placed near the scene centre; a receiver is sampled in the central footprint and moved
+along a straight sub-wavelength trajectory (step $0.15$~m $\approx\lambda$ at $3.5$~GHz); the OFDM CFR
+is computed per step (path solver, depth $3$); dead-spot sequences are rejected. Channels are scaled
+by $10^6$ and standardized per real/imag plane on training statistics; velocity actions are
+standardized. The dataset is $\sim$$6{\times}10^4$ sequences of length $T{=}8$ ($N_a{=}8$, $N_s{=}32$),
+generated and trained in parallel across $8\times$ A100-40GB (PyTorch DDP). Per-module losses and a
+held-out SNR sweep are logged to JSON for a live dashboard that renders the real Sionna scene meshes
+in 3D. Modules carry unit/integration tests (shape, scan$\equiv$step, beamspace round-trip).
 
 %==================================================================
 \section{Empirical results}\label{sec:results}
 
 \subsection{Channel estimation vs.\ classical baselines}
-Table~\ref{tab:chanest} reports held-out NMSE for the full model (full-finetune encoder, U-Net head,
-SNR-randomized training, $3\times10^4$ steps). SSWM outperforms MMSE at \emph{every} SNR, despite not
-receiving the covariance $\mathbf R$ or noise power that MMSE uses, and beats LS by $6$--$60\times$.
+The beamspace model beats MMSE at \emph{every} SNR, \emph{in-distribution and on the held-out unseen
+scene} (Table~\ref{tab:chanest}), without the covariance or noise power MMSE uses. The out-of-
+distribution result is the key one: an earlier abstract-latent model degraded to $0.057$ at $0$~dB OOD
+(losing to MMSE), whereas the beamspace model holds at MMSE parity at $0$~dB and wins at every higher
+SNR --- the scene-invariant phase dynamics generalize.
 
 \begin{table}[h]
 \centering
-\begin{tabular}{lcccc}
+\begin{tabular}{lcc@{\hskip 1.5em}cc}
 \toprule
-SNR & LS & MMSE & \textbf{SSWM} & SSWM vs.\ MMSE \\
+& \multicolumn{2}{c}{in-distribution} & \multicolumn{2}{c}{OOD (held-out \texttt{street\_canyon})} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+SNR & MMSE & \textbf{Beam-WM} & MMSE & \textbf{Beam-WM} \\
 \midrule
-$0$~dB  & $0.998$ & $0.0345$ & $\mathbf{0.0159}$ & $2.2\times$ \\
-$5$~dB  & $0.315$ & $0.0153$ & $\mathbf{0.0066}$ & $2.3\times$ \\
-$10$~dB & $0.100$ & $0.0074$ & $\mathbf{0.0029}$ & $2.6\times$ \\
-$15$~dB & $0.032$ & $0.0045$ & $\mathbf{0.0013}$ & $3.5\times$ \\
-$20$~dB & $0.010$ & $0.0193$ & $\mathbf{0.0007}$ & $27\times$ \\
+$0$~dB  & $0.0369$ & $\mathbf{0.0202}$ & $0.0339$ & $\mathbf{0.0338}$ \\
+$5$~dB  & $0.0153$ & $\mathbf{0.0092}$ & $0.0136$ & $\mathbf{0.0130}$ \\
+$10$~dB & $0.0075$ & $\mathbf{0.0040}$ & $0.0059$ & $\mathbf{0.0053}$ \\
+$15$~dB & $0.0045$ & $\mathbf{0.0019}$ & $0.0044$ & $\mathbf{0.0024}$ \\
+$20$~dB & $0.0211$ & $\mathbf{0.0010}$ & $0.0153$ & $\mathbf{0.0012}$ \\
 \bottomrule
 \end{tabular}
-\caption{Held-out channel-estimation NMSE (lower is better), $60$k sequences, $5$ scenes.}
+\caption{Held-out channel-estimation NMSE (lower better), beamspace world model vs.\ MMSE, in- and
+out-of-distribution. LS is $10^{-\mathrm{SNR}/10}$ (e.g.\ $0.998$ at $0$~dB), beaten by $6$--$60\times$.}
 \label{tab:chanest}
 \end{table}
 
-\subsection{Encoder ablation}
-Encoder adaptation (frozen / LoRA / full fine-tune) leaves channel-estimation NMSE essentially
-unchanged ($\approx\!0.0108$) because the channel head reconstructs primarily from the raw observation;
-full fine-tune helps only the world-model predictor (persistence gain $1.26\times$ vs.\ $1.06\times$).
-The VICReg term is near-constant across all three regimes, indicating it reflects the objective's
-weighted operating point rather than encoder collapse.
-
-\subsection{Diagnostic: the $0$~dB regime}
-An isolated study of the channel-estimation sub-problem at $0$~dB (trained to convergence) gives:
-LS $0.998$; global-mean $1.019$ (the channel is not \emph{a priori} predictable); oracle MMSE
-$0.034$; MLP head $0.286$ (a capacity wall); \textbf{U-Net head $0.0170$} (below oracle MMSE). This
-establishes that (i) a grid-structured head is necessary and sufficient, and (ii) closing the $0$~dB
-gap in the full pipeline required SNR-randomized training so the head sees low-SNR noise.
+\subsection{Prediction}
+The predictor beats persistence and linear AR(1) at horizons $k\ge3$ with a widening margin
+(Table~\ref{tab:horizon}), evidence the SSM learns nonlinear action-driven dynamics rather than a
+linear extrapolation.
 
 %==================================================================
-\section{Findings and design lessons}\label{sec:lessons}
+\section{What we tried and discarded}\label{sec:discarded}
+
+The final design is the product of controlled experiments that refuted several plausible components;
+we report them so the design choices are justified rather than assumed.
 
 \begin{enumerate}[leftmargin=2em]
-\item \textbf{Residual/persistence priors are essential} for both the predictor (channels are highly
-temporally correlated) and the channel head (denoising is a correction on LS), with zero-initialized
-outputs so training starts at the strong prior.
-\item \textbf{Match the training and evaluation noise distributions:} a head trained at a single SNR
-overfits to it; per-sample SNR randomization with $\sigma^2$-conditioning yields SNR-adaptive
-behavior.
-\item \textbf{Grid structure beats linear priors at low SNR:} a convolutional head exploits spatial
-channel correlation unavailable to linear MMSE, surpassing even oracle MMSE at $0$~dB.
-\item \textbf{Diagnose before scaling:} isolating sub-problems (encoder ablation, $0$~dB study)
-overturned two plausible-but-wrong hypotheses (frozen-encoder bottleneck; ``U-Net fails at $0$~dB'')
-that a single end-to-end number would have hidden.
+\item \textbf{Pretrained image-domain encoder (LWM) --- discarded as core.} A transformer pretrained
+on channels by masked modeling produced an \emph{invariant, reconstruction-lossy} latent: recovering
+$\Hc$ from it gave $0.31$ NMSE versus $0.005$ from the raw observation. An encoder ablation
+(frozen/LoRA/full fine-tune) left channel-estimation NMSE unchanged ($\approx\!0.011$), showing the
+pretraining did not help estimation.
+\item \textbf{JEPA joint-embedding objective + EMA target --- discarded.} Predicting an abstract
+invariant latent is the wrong target when the downstream task needs reconstruction; the lossy latent
+made the predicted prior a poor estimate. Replaced by beamspace future-channel prediction
+(\S\ref{sec:objective}), which removed the need for the EMA target, stop-gradient, VICReg
+anti-collapse, and an embedding-scale contract.
+\item \textbf{Supervised control --- reframed the estimation claim.} A same-capacity supervised conv
+head (no world model) \emph{tied} the abstract-latent model on estimation, in-distribution and OOD,
+and across label budgets (a label-efficiency sweep never favored the self-supervised representation).
+This established that the earlier estimation performance was the \emph{architecture}, not the world
+model --- and motivated predict-then-correct (\S\ref{sec:heads}), where the temporal prior gives the
+model information a supervised single-snapshot head structurally lacks.
+\item \textbf{Predictive fusion on a lossy latent --- failed, then fixed by beamspace.} Feeding a
+prior decoded from the lossy latent did not help (the gate learned to ignore it) and destabilized
+training; the same predict-then-correct chain works once the representation is beamspace-faithful.
 \end{enumerate}
+
+\paragraph{Design lessons.}
+(i) Represent the signal where it is sparse and faithful (beamspace) before adding a world model;
+(ii) predict a \emph{faithful} target, not an abstract invariant one, when the prediction must be
+reused; (iii) match training and evaluation distributions (per-sample SNR and horizon randomization);
+(iv) run the controls (supervised, OOD) --- a single end-to-end number hid two wrong hypotheses.
 
 \end{document}
