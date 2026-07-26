@@ -15,11 +15,11 @@ REGION="us-east-2"
 JOB_ROLE_ARN="arn:aws:iam::072510399842:role/greenland-access-37f871283e3e69fdbfe97939a34079a8bfdfdd85"
 
 # ---- INSTANCE-SPECIFIC (edit when you switch jobs) -------------------
-# Job: cmohsinm-workspace (EKS: cmohsinm-workspace-80576fbd)
+# Job: cmohsinm-workspace (EKS: cmohsinm-workspace-f7295cc7)
 # 1x p4d.24xlarge, 8x A100, us-east-2. Initiative: KiroScienceInterns.
-SSM_TARGET="mi-0418eea949ddad741"   # SsmManagedInstanceId from job JSON
-MAIN_NODE_IP="10.3.85.242"          # MainNodeIP / NodesEniHostIP
-LOCAL_PORT="1051"                   # local SSH tunnel port (per-instance to avoid clashes)
+SSM_TARGET="mi-06c0334938da05fa6"   # SsmManagedInstanceId from job JSON
+MAIN_NODE_IP="10.3.174.226"         # MainNodeIP / NodesEniHostIP
+LOCAL_PORT="1052"                   # local SSH tunnel port (per-instance to avoid clashes)
 # ----------------------------------------------------------------------
 
 # ---- SSH / tunnel (stable) ----
