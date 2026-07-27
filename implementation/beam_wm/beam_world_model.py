@@ -123,6 +123,13 @@ class BeamWorldModel(nn.Module):
             self.fuse_body = nn.Sequential(*[_ResBlock(fb) for _ in range(fusion_blocks)])
             self.fuse_mid = nn.Conv2d(fb, fb, 3, padding=1)
             self.fuse_out = nn.Conv2d(fb, 2, 3, padding=1)
+            # SNR-ADAPTIVE ANCHOR (fixes the -5dB instability + 30dB overhead): a mask-aware gate
+            # produces base = g*obs + (1-g)*prior (-> prior at low SNR, -> obs at high SNR), and the
+            # residual body only CORRECTS it. fuse_out zero-init => training starts exactly at the
+            # gated fusion, so the low-SNR fallback is deterministic (kills the seed variance).
+            self.fuse_gate = nn.Sequential(nn.Conv2d(6, fb, 3, padding=1), nn.GELU(),
+                                           nn.Conv2d(fb, 2, 3, padding=1), nn.Sigmoid())
+            nn.init.zeros_(self.fuse_out.weight); nn.init.zeros_(self.fuse_out.bias)
 
     # ---- domain transform (identity under the "beamspace" ablation) ----
     def _to(self, x):
@@ -207,17 +214,21 @@ class BeamWorldModel(nn.Module):
         nv = noise_var.reshape(b, 1, 1, 1).expand(b, 1, na, ns)
         mfull = mask.expand(b, 1, na, ns)
         if self.deep_fusion:
-            # ReEsNet-capacity residual body over [Y_masked, prior_H, mask, nv]; global skip.
+            # ReEsNet-capacity residual body over [Y_masked, prior_H, mask, nv], anchored on an
+            # SNR-adaptive gated fusion so the head only CORRECTS a sane base (stable at SNR extremes).
             x = torch.cat([Y_masked, prior_H, mfull, nv], 1)                 # (B,6,A,S)
+            g = self.fuse_gate(x) * mask            # mask-aware: 0 on unobserved carriers -> prior
+            base = g * Y_masked + (1 - g) * prior_H
             h = self.fuse_in(x)
             h = self.fuse_mid(self.fuse_body(h)) + h
-            return self.fuse_out(h)
+            return base + self.fuse_out(h)          # zero-init out => starts exactly at base
         g = self.sparse_gate(torch.cat([Y_masked, prior_H, mfull, nv], 1))   # (B,2,A,S)
         g_eff = g * mask                                                     # 0 on unobserved carriers
         base = g_eff * Y_masked + (1 - g_eff) * prior_H
         return base + self.sparse_refine(torch.cat([base, prior_H, mfull, nv], 1))
 
-    def losses(self, o, a, snr_range=(0.0, 20.0), horizon_range=(1, 6), noise_gen=None):
+    def losses(self, o, a, snr_range=(0.0, 20.0), horizon_range=(1, 6), noise_gen=None,
+               chan_only=False):
         cfg = self.config
         import random
         T = o.shape[1]
@@ -225,12 +236,18 @@ class BeamWorldModel(nn.Module):
         k = random.randint(horizon_range[0], min(horizon_range[1], T - 2))
         anchor = T - 1 - k
 
-        x, z, h = self.encode(beam, a)
-
-        # --- prediction loss: predict future channel k ahead (in the working domain) ---
-        b_pred = self.predict_beam(z[:, anchor], h[:, anchor], a[:, anchor:anchor + k])
-        b_future = beam[:, anchor + k]
-        loss_pred = F.mse_loss(b_pred, b_future)
+        # chan_only (estimation-only fine-tune): encoder/SSM/predictor are FROZEN -> run them under
+        # no_grad so only the fusion head gets gradients; prediction stays exactly as trained.
+        if chan_only:
+            with torch.no_grad():
+                x, z, h = self.encode(beam, a)
+            loss_pred = torch.zeros((), device=o.device)
+        else:
+            x, z, h = self.encode(beam, a)
+            # --- prediction loss: predict future channel k ahead (in the working domain) ---
+            b_pred = self.predict_beam(z[:, anchor], h[:, anchor], a[:, anchor:anchor + k])
+            b_future = beam[:, anchor + k]
+            loss_pred = F.mse_loss(b_pred, b_future)
 
         # --- estimation loss: predict-from-history prior + noisy obs -> current channel ---
         H_clean = o[:, anchor]                                        # antenna-domain clean
@@ -252,7 +269,7 @@ class BeamWorldModel(nn.Module):
             H_hat = self._from(est_beam)
         loss_chan = F.mse_loss(H_hat, H_clean)
 
-        total = loss_pred + 5.0 * loss_chan
+        total = loss_chan if chan_only else (loss_pred + 5.0 * loss_chan)
         with torch.no_grad():
             met = {"total": total.item(), "pred": loss_pred.item(), "chan": loss_chan.item(),
                    "chan_nmse": (F.mse_loss(H_hat, H_clean) / H_clean.pow(2).mean()).item()}
@@ -289,6 +306,20 @@ class BeamWorldModel(nn.Module):
         prior_H = self._from(prior_beam)
         H_hat = self.estimate_sparse(Y_masked, prior_H, mask, nvar.reshape(-1))
         return H_hat, H_clean, Y_masked, mask
+
+    def freeze_for_finetune(self):
+        """Freeze everything except the sparse fusion head, for estimation-only fine-tuning.
+        Keeps encoder/SSM/predictor (hence the prediction task + the prior) exactly as trained;
+        only the head that maps (obs, prior) -> estimate keeps learning."""
+        head = {"fuse_in", "fuse_body", "fuse_mid", "fuse_out", "fuse_gate",
+                "sparse_gate", "sparse_refine"}
+        n_train = n_frozen = 0
+        for name, p in self.named_parameters():
+            top = name.split(".")[0]
+            p.requires_grad = top in head
+            n_train += p.numel() if p.requires_grad else 0
+            n_frozen += 0 if p.requires_grad else p.numel()
+        return n_train, n_frozen
 
     def forward(self, o, a, **kw):
         return self.losses(o, a, **kw)

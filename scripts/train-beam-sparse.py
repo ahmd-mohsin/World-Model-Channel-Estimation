@@ -37,6 +37,9 @@ def main():
     ap.add_argument("--ablate", default="full", choices=list(BeamWorldModel.ABLATIONS))
     ap.add_argument("--deep_fusion", action="store_true",
                     help="use ReEsNet-capacity fusion head fed the WM prior")
+    ap.add_argument("--finetune_steps", type=int, default=0,
+                    help="after joint training, freeze all but the fusion head and train it on "
+                         "estimation-only loss (kills the multitask dilution of the estimator)")
     args = ap.parse_args()
     torch.manual_seed(args.seed)
 
@@ -68,6 +71,29 @@ def main():
         torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0); opt.step(); sched.step()
         if main_rank and (step % 2000 == 0 or step == args.steps - 1):
             print(f"step {step:5d} | total {met['total']:.4f} | chan_nmse {met['chan_nmse']:.4f}", flush=True)
+
+    # ---- estimation-only fine-tune: freeze encoder/SSM/predictor, train only the fusion head ----
+    if args.finetune_steps > 0:
+        dist.barrier()
+        n_tr, n_fr = m.freeze_for_finetune()
+        if main_rank:
+            print(f"[finetune] head params {n_tr:,} trainable, {n_fr:,} frozen (predictor intact)",
+                  flush=True)
+        # fresh DDP + optimizer over the head params only
+        ft = DDP(m, device_ids=[local], find_unused_parameters=True)
+        ft_lr = args.lr * 0.5
+        ft_opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad],
+                                   lr=ft_lr, weight_decay=1e-4)
+        ft_sched = torch.optim.lr_scheduler.OneCycleLR(ft_opt, max_lr=ft_lr,
+                                                       total_steps=args.finetune_steps, pct_start=0.1)
+        for step in range(args.finetune_steps):
+            o, a = ds.batch(args.bs, "train", rng=rng, device=dev)
+            total, met = ft(o, a, noise_gen=ng, chan_only=True)
+            ft_opt.zero_grad(); total.backward()
+            torch.nn.utils.clip_grad_norm_([p for p in m.parameters() if p.requires_grad], 1.0)
+            ft_opt.step(); ft_sched.step()
+            if main_rank and (step % 2000 == 0 or step == args.finetune_steps - 1):
+                print(f"[ft] step {step:5d} | chan_nmse {met['chan_nmse']:.4f}", flush=True)
 
     dist.barrier()
     if main_rank:
