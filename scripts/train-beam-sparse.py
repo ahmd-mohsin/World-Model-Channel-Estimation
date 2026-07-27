@@ -35,6 +35,8 @@ def main():
     ap.add_argument("--tag", default="sp")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--ablate", default="full", choices=list(BeamWorldModel.ABLATIONS))
+    ap.add_argument("--deep_fusion", action="store_true",
+                    help="use ReEsNet-capacity fusion head fed the WM prior")
     args = ap.parse_args()
     torch.manual_seed(args.seed)
 
@@ -49,7 +51,8 @@ def main():
     if main_rank:
         print(f"world={dist.get_world_size()} | train {len(ds.train_idx)} test {len(ds.test_idx)} "
               f"| stride={args.stride} ablate={args.ablate} holdout={args.holdout_scene}", flush=True)
-    m = BeamWorldModel(cfg, ablate=args.ablate, sparse_stride=args.stride).to(dev)
+    m = BeamWorldModel(cfg, ablate=args.ablate, sparse_stride=args.stride,
+                       deep_fusion=args.deep_fusion).to(dev)
     if main_rank:
         print(f"params: {sum(p.numel() for p in m.parameters()):,}", flush=True)
     ddp = DDP(m, device_ids=[local], find_unused_parameters=True)

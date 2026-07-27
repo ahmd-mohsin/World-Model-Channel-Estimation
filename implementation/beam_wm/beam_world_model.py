@@ -80,11 +80,13 @@ class BeamWorldModel(nn.Module):
     #   "beamspace" : operate in the raw antenna-subcarrier domain (skip the 2D-DFT)
     ABLATIONS = ("full", "prior", "action", "ssm", "beamspace")
 
-    def __init__(self, config: SSWMConfig, ablate: str = "full", sparse_stride: int = 0):
+    def __init__(self, config: SSWMConfig, ablate: str = "full", sparse_stride: int = 0,
+                 deep_fusion: bool = False, fusion_blocks: int = 8):
         super().__init__()
         assert ablate in self.ABLATIONS, f"unknown ablation {ablate!r}"
         self.ablate = ablate
         self.sparse_stride = sparse_stride      # 0 = dense pilots; s>1 = 1-in-s comb pilots
+        self.deep_fusion = deep_fusion          # ReEsNet-capacity sparse head fed the WM prior
         self.config = config
         d, na, ns = config.latent_dim, config.n_antennas, config.n_subcarriers
         self.encoder = BeamEncoder(na, ns, d, base=config.unet_base_ch)
@@ -110,6 +112,17 @@ class BeamWorldModel(nn.Module):
         self.sparse_refine = nn.Sequential(_ConvBlock(6, config.unet_base_ch),
                                            nn.Conv2d(config.unet_base_ch, 2, 1))
         nn.init.zeros_(self.sparse_refine[-1].weight); nn.init.zeros_(self.sparse_refine[-1].bias)
+        if deep_fusion:
+            # ReEsNet-capacity fusion head: SAME residual body as the standalone baseline, but fed
+            # the WM prior as extra channels -> [Y_masked(2), prior_H(2), mask(1), nv(1)] = 6 in.
+            # At equal capacity it sees strictly MORE than ReEsNet (obs + world-model prediction),
+            # so if the prior has value the fused head should be >= ReEsNet everywhere.
+            from ..task_heads.deep_baseline import _ResBlock
+            fb = 64
+            self.fuse_in = nn.Conv2d(6, fb, 3, padding=1)
+            self.fuse_body = nn.Sequential(*[_ResBlock(fb) for _ in range(fusion_blocks)])
+            self.fuse_mid = nn.Conv2d(fb, fb, 3, padding=1)
+            self.fuse_out = nn.Conv2d(fb, 2, 3, padding=1)
 
     # ---- domain transform (identity under the "beamspace" ablation) ----
     def _to(self, x):
@@ -193,6 +206,12 @@ class BeamWorldModel(nn.Module):
         b, _, na, ns = Y_masked.shape
         nv = noise_var.reshape(b, 1, 1, 1).expand(b, 1, na, ns)
         mfull = mask.expand(b, 1, na, ns)
+        if self.deep_fusion:
+            # ReEsNet-capacity residual body over [Y_masked, prior_H, mask, nv]; global skip.
+            x = torch.cat([Y_masked, prior_H, mfull, nv], 1)                 # (B,6,A,S)
+            h = self.fuse_in(x)
+            h = self.fuse_mid(self.fuse_body(h)) + h
+            return self.fuse_out(h)
         g = self.sparse_gate(torch.cat([Y_masked, prior_H, mfull, nv], 1))   # (B,2,A,S)
         g_eff = g * mask                                                     # 0 on unobserved carriers
         base = g_eff * Y_masked + (1 - g_eff) * prior_H
