@@ -39,11 +39,12 @@ the \textbf{beamspace} (angle--delay) domain, where the channel is sparse and a 
 reconstruction-faithful; a Mamba-style \emph{selective state-space} (SSM) backbone rolls the latent
 forward under the receiver-motion action and \emph{predicts the future channel}, and a
 noise-conditioned convolutional head fuses that prediction with the noisy observation to estimate the
-current channel. Trained end-to-end by Distributed Data Parallel across $8\times$ A100 GPUs on
-$\sim$$6{\times}10^4$ ray-traced Sionna~RT channel sequences over five city scenes, the estimator
-attains lower NMSE than the optimal linear (MMSE) estimator \emph{at every SNR from $0$ to $20$~dB},
-\emph{both in-distribution and on a held-out (unseen) scene}, without access to the channel
-covariance or noise power that MMSE requires. \S\ref{sec:discarded} records, honestly, the components
+current channel. Trained end-to-end across $8\times$ A100 GPUs on
+$6.4{\times}10^4$ ray-traced Sionna~RT channel sequences over six city scenes, the estimator
+attains lower NMSE than the optimal linear (MMSE) estimator \emph{at every SNR from $-5$ to $30$~dB},
+\emph{in-distribution (over 3 seeds) and on every one of six held-out (unseen) scenes} (leave-one-
+scene-out, $42/42$ wins), without access to the channel covariance or noise power that MMSE requires;
+the predictor likewise beats persistence and linear AR(1) at every horizon $k=1,\dots,6$. \S\ref{sec:discarded} records, honestly, the components
 we tried and discarded on the evidence (a JEPA joint-embedding objective and a lossy pretrained
 encoder), and the controls (a same-capacity supervised baseline; an out-of-distribution split) that
 drove the final design.
@@ -181,9 +182,12 @@ decoding to the \emph{future channel in beamspace}. This is a reconstruction-bas
 \paragraph{Multi-horizon training.}
 Training at a single fixed horizon overfits to it and degrades beyond it (a $k{=}3$-only predictor at
 $k{=}6$ reached $0.213$ NMSE, worse than persistence). We sample $k\sim\mathcal U\{1,\dots,6\}$ per
-step. This eliminated the out-of-horizon collapse ($k{=}6:0.213\!\to\!0.080$) and the learned
-predictor beats a linear AR(1) baseline for all $k\ge3$ with a margin that \emph{widens} with horizon
-(the world-model signature); AR(1) is marginally better only at $k\in\{1,2\}$ (Table~\ref{tab:horizon}).
+step. Evaluated in \emph{channel space} on the 6-scene stress dataset, the learned predictor beats
+both persistence and a channel-space linear AR(1) at \emph{every} horizon $k=1,\dots,6$, and the
+margin \emph{widens} with $k$ --- the world-model signature: persistence and AR(1) both decay with
+horizon while the SSM prediction stays nearly flat (Table~\ref{tab:horizon}). Notably AR(1) crosses
+\emph{above} persistence by $k{=}5$ (linear extrapolation compounds error), whereas the nonlinear
+action-driven roll does not.
 
 \begin{table}[h]
 \centering
@@ -191,12 +195,13 @@ predictor beats a linear AR(1) baseline for all $k\ge3$ with a margin that \emph
 \toprule
 horizon $k$ & 1 & 2 & 3 & 4 & 5 & 6 \\
 \midrule
-persistence & $0.092$ & $0.089$ & $0.092$ & $0.101$ & $0.103$ & $0.098$ \\
-AR(1)       & $\mathbf{0.063}$ & $\mathbf{0.068}$ & $0.074$ & $0.080$ & $0.087$ & $0.091$ \\
-\textbf{predictor} & $0.067$ & $0.070$ & $\mathbf{0.072}$ & $\mathbf{0.074}$ & $\mathbf{0.078}$ & $\mathbf{0.080}$ \\
+persistence & $0.374$ & $0.409$ & $0.431$ & $0.452$ & $0.479$ & $0.509$ \\
+AR(1)       & $0.295$ & $0.342$ & $0.395$ & $0.457$ & $0.517$ & $0.573$ \\
+\textbf{predictor} & $\mathbf{0.249}$ & $\mathbf{0.260}$ & $\mathbf{0.272}$ & $\mathbf{0.284}$ & $\mathbf{0.296}$ & $\mathbf{0.310}$ \\
 \bottomrule
 \end{tabular}
-\caption{Held-out prediction NMSE vs.\ horizon (lower better). Beats both baselines for $k\ge3$.}
+\caption{Held-out channel-space prediction NMSE vs.\ horizon (lower better), in-distribution.
+Beats both baselines at every horizon; margin widens with $k$.}
 \label{tab:horizon}
 \end{table}
 
@@ -262,14 +267,17 @@ clipping at norm $1$; per-sample horizon $k$ and SNR $s$.
 %==================================================================
 \section{Data pipeline and systems}\label{sec:data}
 
-Channels are generated with \textbf{Sionna~RT} across five city scenes (\texttt{munich},
-\texttt{etoile}, \texttt{florence}, \texttt{san\_francisco}, \texttt{simple\_street\_canyon}). A
-transmitter is placed near the scene centre; a receiver is sampled in the central footprint and moved
-along a straight sub-wavelength trajectory (step $0.15$~m $\approx\lambda$ at $3.5$~GHz); the OFDM CFR
-is computed per step (path solver, depth $3$); dead-spot sequences are rejected. Channels are scaled
-by $10^6$ and standardized per real/imag plane on training statistics; velocity actions are
-standardized. The dataset is $\sim$$6{\times}10^4$ sequences of length $T{=}8$ ($N_a{=}8$, $N_s{=}32$),
-generated and trained in parallel across $8\times$ A100-40GB (PyTorch DDP). Per-module losses and a
+Channels are generated with \textbf{Sionna~RT} across six city scenes (\texttt{munich},
+\texttt{etoile}, \texttt{florence}, \texttt{san\_francisco}, \texttt{simple\_street\_canyon},
+\texttt{simple\_street\_canyon\_with\_cars}). A transmitter is placed near the scene centre; a
+receiver is sampled in the central footprint and moved along a straight sub-wavelength trajectory
+(step $0.15$~m $\approx\lambda$ at $3.5$~GHz) at a per-sequence speed sampled in $[0.3,2.0]$ (widened
+to stress under-represented dynamics); the OFDM CFR is computed per step (path solver, depth $3$);
+dead-spot sequences are rejected. Channels are scaled by $10^6$ and standardized per real/imag plane
+on training statistics; velocity actions are standardized. The dataset is $6.4{\times}10^4$ sequences
+of length $T{=}8$ ($N_a{=}8$, $N_s{=}32$; $8$k per scene-shard), generated in parallel across
+$8\times$ A100-40GB. The stress protocol runs $9$ independent trainings ($3$ in-distribution seeds
+$+$ $6$ leave-one-scene-out), one GPU each. Per-module losses and a
 held-out SNR sweep are logged to JSON for a live dashboard that renders the real Sionna scene meshes
 in 3D. Modules carry unit/integration tests (shape, scan$\equiv$step, beamspace round-trip).
 
@@ -277,36 +285,126 @@ in 3D. Modules carry unit/integration tests (shape, scan$\equiv$step, beamspace 
 \section{Empirical results}\label{sec:results}
 
 \subsection{Channel estimation vs.\ classical baselines}
-The beamspace model beats MMSE at \emph{every} SNR, \emph{in-distribution and on the held-out unseen
-scene} (Table~\ref{tab:chanest}), without the covariance or noise power MMSE uses. The out-of-
-distribution result is the key one: an earlier abstract-latent model degraded to $0.057$ at $0$~dB OOD
-(losing to MMSE), whereas the beamspace model holds at MMSE parity at $0$~dB and wins at every higher
-SNR --- the scene-invariant phase dynamics generalize.
+The beamspace model beats MMSE at \emph{every} SNR from $-5$ to $30$~dB, \emph{in-distribution
+(3 seeds) and on every one of six held-out unseen scenes} (Table~\ref{tab:chanest}), without the
+covariance or noise power MMSE uses. Two points stand out. (i) \textbf{OOD is a clean win, not a tie:}
+leave-one-scene-out over all six scenes, Beam-WM beats MMSE at $42/42$ scene$\times$SNR cells --- an
+earlier abstract-latent model had degraded to $0.057$ at $0$~dB OOD (losing to MMSE), so the
+beamspace scene-invariant phase dynamics are what generalize. (ii) \textbf{MMSE breaks at high SNR}
+($0.026$ at $20$~dB, $1.47$ at $30$~dB in-dist) because its fixed covariance regularization
+over-smooths when little noise is present, while Beam-WM keeps improving ($0.0011$, $0.0006$); the
+learned $\sigma^2$-conditioned gate simply trusts the observation. Error bars over 3 seeds are
+$\le\!0.0013$ NMSE.
 
 \begin{table}[h]
 \centering
-\begin{tabular}{lcc@{\hskip 1.5em}cc}
+\begin{tabular}{lcc@{\hskip 1.2em}cc}
 \toprule
-& \multicolumn{2}{c}{in-distribution} & \multicolumn{2}{c}{OOD (held-out \texttt{street\_canyon})} \\
+& \multicolumn{2}{c}{in-distribution (3 seeds)} & \multicolumn{2}{c}{OOD (avg.\ over 6 held-out scenes)} \\
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}
 SNR & MMSE & \textbf{Beam-WM} & MMSE & \textbf{Beam-WM} \\
 \midrule
-$0$~dB  & $0.0369$ & $\mathbf{0.0202}$ & $0.0339$ & $\mathbf{0.0338}$ \\
-$5$~dB  & $0.0153$ & $\mathbf{0.0092}$ & $0.0136$ & $\mathbf{0.0130}$ \\
-$10$~dB & $0.0075$ & $\mathbf{0.0040}$ & $0.0059$ & $\mathbf{0.0053}$ \\
-$15$~dB & $0.0045$ & $\mathbf{0.0019}$ & $0.0044$ & $\mathbf{0.0024}$ \\
-$20$~dB & $0.0211$ & $\mathbf{0.0010}$ & $0.0153$ & $\mathbf{0.0012}$ \\
+$-5$~dB & $0.0863$ & $\mathbf{0.0592}$ & $0.1040$ & $\mathbf{0.0644}$ \\
+$0$~dB  & $0.0330$ & $\mathbf{0.0224}$ & $0.0384$ & $\mathbf{0.0259}$ \\
+$5$~dB  & $0.0127$ & $\mathbf{0.0095}$ & $0.0155$ & $\mathbf{0.0108}$ \\
+$10$~dB & $0.0060$ & $\mathbf{0.0040}$ & $0.0078$ & $\mathbf{0.0049}$ \\
+$15$~dB & $0.0043$ & $\mathbf{0.0019}$ & $0.0055$ & $\mathbf{0.0026}$ \\
+$20$~dB & $0.0260$ & $\mathbf{0.0011}$ & $0.0221$ & $\mathbf{0.0018}$ \\
+$30$~dB & $1.4663$ & $\mathbf{0.0006}$ & $0.9695$ & $\mathbf{0.0013}$ \\
 \bottomrule
 \end{tabular}
-\caption{Held-out channel-estimation NMSE (lower better), beamspace world model vs.\ MMSE, in- and
-out-of-distribution. LS is $10^{-\mathrm{SNR}/10}$ (e.g.\ $0.998$ at $0$~dB), beaten by $6$--$60\times$.}
+\caption{Held-out channel-estimation NMSE (lower better), beamspace world model vs.\ MMSE, in-
+and out-of-distribution, on the 6-scene stress dataset ($64$k sequences). LS is
+$10^{-\mathrm{SNR}/10}$ (e.g.\ $1.0$ at $0$~dB, $3.16$ at $-5$~dB), beaten by $5$--$1600\times$.
+OOD is leave-one-scene-out, averaged over all six scenes; Beam-WM wins all $42$ scene$\times$SNR cells.}
 \label{tab:chanest}
 \end{table}
 
 \subsection{Prediction}
-The predictor beats persistence and linear AR(1) at horizons $k\ge3$ with a widening margin
-(Table~\ref{tab:horizon}), evidence the SSM learns nonlinear action-driven dynamics rather than a
-linear extrapolation.
+The predictor beats persistence and linear AR(1) at \emph{every} horizon $k=1,\dots,6$ with a widening
+margin (Table~\ref{tab:horizon}), evidence the SSM learns nonlinear action-driven dynamics rather than
+a linear extrapolation --- AR(1) itself decays below persistence by $k{=}5$.
+
+\subsection{Module ablations}\label{sec:ablation}
+To attribute the result to mechanisms, we retrain the model with one component removed at a time
+(same data, budget, and seed) and re-measure estimation NMSE vs.\ SNR (Table~\ref{tab:ablation}).
+Four ablations: \textbf{no prior} (the fusion gate sees only the observation and $\sigma^2$, not the
+world-model prior); \textbf{no action} (actions zeroed, so the SSM cannot use motion);
+\textbf{persistence prior} (the prior is the previous clean frame echoed, i.e.\ no learned dynamics);
+and \textbf{no beamspace} (operate in the raw antenna--subcarrier domain, skipping the 2-D DFT).
+
+Three findings. (i) \textbf{Beamspace is the dominant enabler:} removing the 2-D DFT worsens
+estimation by $+230$--$276\%$ at every SNR --- an order of magnitude larger than any other effect,
+confirming that representing the channel where it is sparse and faithful is what makes the compact
+model work. (ii) \textbf{The world-model prior is a genuine but modest refinement for estimation:}
+removing it costs $+5$--$6\%$ NMSE on average and \emph{most at low SNR} ($+20\%$ at $-5$~dB in-dist,
+$+16\%$ OOD), exactly where the noisy observation is least trustworthy and a temporal prior helps most.
+(iii) \textbf{The learned dynamics matter more for prediction than estimation:} a cheap persistence
+prior ties or slightly beats the learned roll for the estimation gate at mid-SNR, but for the
+prediction task (Table~\ref{tab:horizon}) the full learned model beats the persistence, no-action, and
+no-beamspace variants at every horizon --- forecasting is where the action-conditioned SSM earns its
+keep. Actions are irrelevant to single-step estimation but help long-horizon prediction ($k{=}6$).
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+SNR & \textbf{full} & no prior & no action & persist.\ prior & no beamspace \\
+\midrule
+$-5$~dB & $\mathbf{0.0580}$ & $0.0694$ & $0.0566$ & $0.0579$ & $0.1937$ \\
+$0$~dB  & $0.0224$ & $0.0240$ & $0.0221$ & $\mathbf{0.0199}$ & $0.0743$ \\
+$10$~dB & $0.0041$ & $0.0042$ & $0.0040$ & $\mathbf{0.0037}$ & $0.0149$ \\
+$20$~dB & $0.0011$ & $0.0011$ & $0.0011$ & $0.0011$ & $0.0038$ \\
+$30$~dB & $\mathbf{0.0006}$ & $0.0006$ & $0.0006$ & $0.0007$ & $0.0024$ \\
+\bottomrule
+\end{tabular}
+\caption{In-distribution estimation NMSE with one module removed (lower better). No beamspace is
+catastrophic ($+230$--$276\%$); the prior helps most at low SNR; a persistence prior is competitive
+for the \emph{estimation} gate but not for prediction (Table~\ref{tab:horizon}).}
+\label{tab:ablation}
+\end{table}
+
+\subsection{Sparse-pilot estimation: when the prior becomes load-bearing}\label{sec:sparse}
+The ablation above shows the world-model prior is only a modest help when the estimator observes the
+\emph{full} noisy grid --- the fusion gate can lean on the observation and largely ignore the prior.
+The realistic regime is different: practical OFDM estimates the channel from \emph{sparse comb
+pilots} and must fill the unobserved subcarriers. We model this with a $1$-in-$s$ comb mask: the
+observation is zeroed on non-pilot subcarriers, and fusion runs in the antenna--subcarrier domain
+with a \emph{mask-aware} gate $g_{\text{eff}}=g\odot\text{mask}$, so unobserved subcarriers are forced
+onto the world-model prior (the dense channel decoded from the beamspace prediction). Encoder, SSM,
+and predictor stay in beamspace.
+
+Here the prior is decisively load-bearing, and its value \emph{grows as pilots thin}
+(Table~\ref{tab:sparse}): removing it (\emph{no prior}, same mask-aware head) costs, averaged over
+SNR, $+29\%$ at $50\%$ pilots, $+76\%$ at $25\%$, and $+148\%$ at $12.5\%$ --- at $12.5\%$ pilots the
+full model is $\sim$$2.5\times$ better than without the prior, and the OOD lift ($+69\%$ at $25\%$)
+matches the in-distribution one. This resolves the ablation puzzle: the gate ignored the prior under
+dense pilots because it \emph{could}; deny it a full observation and the temporal prior is what fills
+the gap. Against baselines the picture is honest and mixed: the model beats classical linear pilot
+interpolation at every density and SNR, but a masked linear-MMSE interpolator \emph{handed the true
+frequency covariance and noise power} is strong and wins at most SNRs --- the world model overtakes it
+only in the hardest corner (very sparse $\times$ low SNR, e.g.\ $12.5\%$ pilots at $-5$ and $0$~dB,
+marked $^\ast$), where the fixed-covariance MMSE degrades.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+& \multicolumn{4}{c}{avg.\ over SNR $[-5,30]$~dB} \\
+pilots (stride) & interp & masked-MMSE & \textbf{full} & no prior \\
+\midrule
+$50\%$ ($s{=}2$)   & $0.51$ & $0.15$ & $0.09$ & $0.13$ \quad($+29\%$) \\
+$25\%$ ($s{=}4$)   & $0.48$ & $0.09$ & $0.11$ & $0.19$ \quad($+76\%$) \\
+$12.5\%$ ($s{=}8$) & $0.51$ & $0.13$ & $0.14^\ast$ & $0.35$ \quad($+148\%$) \\
+$25\%$ OOD         & $0.48$ & $0.10$ & $0.12$ & $0.20$ \quad($+69\%$) \\
+\bottomrule
+\end{tabular}
+\caption{Sparse-pilot estimation NMSE (SNR-averaged, lower better). The world-model prior's lift over
+an identical no-prior head \emph{grows} as pilots thin ($+29\!\to\!+76\!\to\!+148\%$). The model beats
+linear interpolation everywhere; oracle-covariance masked-MMSE wins at most SNRs, and the model
+overtakes it only in the very-sparse/low-SNR corner ($^\ast$).}
+\label{tab:sparse}
+\end{table}
 
 %==================================================================
 \section{What we tried and discarded}\label{sec:discarded}

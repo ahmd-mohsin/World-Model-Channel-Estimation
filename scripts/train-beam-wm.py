@@ -15,7 +15,6 @@ from implementation.wireless_data.beamspace import to_beamspace, from_beamspace
 from implementation.task_heads.baselines import add_noise, mmse_estimate, nmse
 
 OUT = Path("implementation/checkpoints"); DASH = Path("dashboard")
-STRESS = Path("results/stress")
 
 
 def main():
@@ -27,6 +26,7 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--tag", default="beam")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--ablate", default="full", choices=list(BeamWorldModel.ABLATIONS))
     args = ap.parse_args()
     torch.manual_seed(args.seed)
 
@@ -41,9 +41,9 @@ def main():
     if main_rank:
         print(f"world={dist.get_world_size()} | train {len(ds.train_idx)} test {len(ds.test_idx)} "
               f"| holdout={args.holdout_scene} | scenes {ds.scenes}", flush=True)
-    m = BeamWorldModel(cfg).to(dev)
+    m = BeamWorldModel(cfg, ablate=args.ablate).to(dev)
     if main_rank:
-        print(f"params: {sum(p.numel() for p in m.parameters()):,}", flush=True)
+        print(f"params: {sum(p.numel() for p in m.parameters()):,} | ablate={args.ablate}", flush=True)
     ddp = DDP(m, device_ids=[local], find_unused_parameters=True)
     opt = torch.optim.AdamW(m.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.steps, pct_start=0.05)
@@ -65,6 +65,8 @@ def main():
 
     dist.barrier()
     if main_rank:
+        # route outputs by tag: ab_* -> results/ablation, else results/stress
+        STRESS = Path("results/ablation" if args.tag.startswith("ab_") else "results/stress")
         m.eval()
         o, a = ds.all("test", device=dev); o, a = o[:2000], a[:2000]
         Htr = ds.all("train", device=dev)[0][:, -1]
@@ -100,13 +102,13 @@ def main():
         def uncvec(xc):                    # (B,d) complex -> (B,2,A,S)
             xr = xc.reshape(-1, cfg.n_antennas, cfg.n_subcarriers)
             return torch.stack([xr.real, xr.imag], 1)
-        _, z, h = m.encode(to_beamspace(o), a)
+        _, z, h = m.encode(m._to(o), a)        # working domain honors the ablation
         pred = {}
         print("\n  k   persist    AR(1)     BEAM", flush=True)
         for k in range(1, min(6, T - 1) + 1):
             anchor = T - 1 - k
             b_pred = m.predict_beam(z[:, anchor], h[:, anchor], a[:, anchor:anchor + k])
-            H_pred = from_beamspace(b_pred)
+            H_pred = m._from(b_pred)
             H_true = o[:, anchor + k]
             H_pers = o[:, anchor]                       # persistence: last seen frame
             h_ar = cvec(o[:, anchor])

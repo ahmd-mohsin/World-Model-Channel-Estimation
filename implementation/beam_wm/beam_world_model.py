@@ -72,8 +72,19 @@ class BeamDecoder(nn.Module):
 
 
 class BeamWorldModel(nn.Module):
-    def __init__(self, config: SSWMConfig):
+    # ablation modes — each removes exactly ONE mechanism, all else identical:
+    #   "full"      : the complete model (default)
+    #   "prior"     : estimation gate sees NO world-model prior (prior_beam := 0)
+    #   "action"    : actions zeroed everywhere (SSM/predictor can't use motion)
+    #   "ssm"       : prior := previous clean frame echoed (persistence; no learned dynamics)
+    #   "beamspace" : operate in the raw antenna-subcarrier domain (skip the 2D-DFT)
+    ABLATIONS = ("full", "prior", "action", "ssm", "beamspace")
+
+    def __init__(self, config: SSWMConfig, ablate: str = "full", sparse_stride: int = 0):
         super().__init__()
+        assert ablate in self.ABLATIONS, f"unknown ablation {ablate!r}"
+        self.ablate = ablate
+        self.sparse_stride = sparse_stride      # 0 = dense pilots; s>1 = 1-in-s comb pilots
         self.config = config
         d, na, ns = config.latent_dim, config.n_antennas, config.n_subcarriers
         self.encoder = BeamEncoder(na, ns, d, base=config.unet_base_ch)
@@ -93,10 +104,28 @@ class BeamWorldModel(nn.Module):
                                   nn.Conv2d(config.unet_base_ch, 2, 3, padding=1), nn.Sigmoid())
         self.refine = nn.Sequential(_ConvBlock(5, config.unet_base_ch), nn.Conv2d(config.unet_base_ch, 2, 1))
         nn.init.zeros_(self.refine[-1].weight); nn.init.zeros_(self.refine[-1].bias)
+        # SPARSE-PILOT fusion (H-domain, mask-aware): [Y_masked(2), prior_H(2), mask(1), nv(1)] = 6ch
+        self.sparse_gate = nn.Sequential(nn.Conv2d(6, config.unet_base_ch, 3, padding=1), nn.GELU(),
+                                         nn.Conv2d(config.unet_base_ch, 2, 3, padding=1), nn.Sigmoid())
+        self.sparse_refine = nn.Sequential(_ConvBlock(6, config.unet_base_ch),
+                                           nn.Conv2d(config.unet_base_ch, 2, 1))
+        nn.init.zeros_(self.sparse_refine[-1].weight); nn.init.zeros_(self.sparse_refine[-1].bias)
+
+    # ---- domain transform (identity under the "beamspace" ablation) ----
+    def _to(self, x):
+        return x if self.ablate == "beamspace" else to_beamspace(x)
+
+    def _from(self, x):
+        return x if self.ablate == "beamspace" else from_beamspace(x)
+
+    def _act(self, a):
+        """Zero actions under the 'action' ablation so motion cannot inform dynamics."""
+        return torch.zeros_like(a) if self.ablate == "action" else a
 
     # ---- encode a beam sequence to latents + SSM states ----
     def encode(self, beam_seq, a):
         b, t = beam_seq.shape[:2]
+        a = self._act(a)
         x = self.encoder(beam_seq.reshape(b * t, *beam_seq.shape[2:])).reshape(b, t, -1)
         A, B, C, dt = self.selection(a)
         u = self.in_proj(torch.cat([x, a], dim=-1))
@@ -112,6 +141,7 @@ class BeamWorldModel(nn.Module):
     def predict_beam(self, z_t, h_t, planned_acts):
         """Roll k steps from (z_t, SSM state h_t) with planned actions -> future beam channel."""
         h = h_t if h_t is not None else self.z_to_h(z_t)
+        planned_acts = self._act(planned_acts)
         for j in range(planned_acts.shape[1]):
             a_j = planned_acts[:, j]
             A, B, C, dt = self.selection(a_j)
@@ -121,6 +151,21 @@ class BeamWorldModel(nn.Module):
             y = C * h + self.D * u
         return self.decoder(self.pred_to_z(y))          # (B,2,A,S) predicted beam channel
 
+    def _prior(self, z, h, a, anchor, obs_beam, beam):
+        """World-model prior for the current step, honoring ablations.
+          full/action/beamspace : roll the predictor from p steps back on clean history
+          prior                  : no prior (zeros) — gate sees only obs + noise
+          ssm                    : previous clean frame echoed (persistence; no learned dynamics)
+        """
+        if self.ablate == "prior":
+            return torch.zeros_like(obs_beam)
+        p = min(2, anchor)
+        if self.ablate == "ssm":
+            return beam[:, anchor - 1] if anchor >= 1 else torch.zeros_like(obs_beam)
+        if p >= 1:
+            return self.predict_beam(z[:, anchor - p], h[:, anchor - p], a[:, anchor - p:anchor])
+        return torch.zeros_like(obs_beam)
+
     def estimate(self, obs_beam, prior_beam, noise_var):
         b, _, na, ns = obs_beam.shape
         nv = noise_var.reshape(b, 1, 1, 1).expand(b, 1, na, ns)
@@ -128,17 +173,42 @@ class BeamWorldModel(nn.Module):
         base = g * obs_beam + (1 - g) * prior_beam                    # Kalman fusion
         return base + self.refine(torch.cat([base, prior_beam, nv], 1))
 
+    @staticmethod
+    def comb_mask(n_sub, stride, device):
+        """1-in-`stride` comb pilot mask over subcarriers: (1,1,1,n_sub), 1=pilot, 0=unobserved."""
+        m = torch.zeros(n_sub, device=device)
+        m[::stride] = 1.0
+        return m.reshape(1, 1, 1, n_sub)
+
+    def estimate_sparse(self, Y_masked, prior_H, mask, noise_var):
+        """Sparse-pilot fusion in the ANTENNA-SUBCARRIER (H) domain.
+
+        On observed subcarriers the gate may trust the (masked) observation; on UNOBSERVED
+        subcarriers there is no observation, so the fused estimate is FORCED onto the world-model
+        prior via g_eff = g * mask. This is where a good prior structurally wins.
+          Y_masked : (B,2,A,S) noisy obs with unobserved subcarriers zeroed
+          prior_H  : (B,2,A,S) world-model prior, decoded to H-domain (dense)
+          mask     : (1,1,1,S) or (B,1,A,S) comb mask
+        """
+        b, _, na, ns = Y_masked.shape
+        nv = noise_var.reshape(b, 1, 1, 1).expand(b, 1, na, ns)
+        mfull = mask.expand(b, 1, na, ns)
+        g = self.sparse_gate(torch.cat([Y_masked, prior_H, mfull, nv], 1))   # (B,2,A,S)
+        g_eff = g * mask                                                     # 0 on unobserved carriers
+        base = g_eff * Y_masked + (1 - g_eff) * prior_H
+        return base + self.sparse_refine(torch.cat([base, prior_H, mfull, nv], 1))
+
     def losses(self, o, a, snr_range=(0.0, 20.0), horizon_range=(1, 6), noise_gen=None):
         cfg = self.config
         import random
         T = o.shape[1]
-        beam = to_beamspace(o)                  # (B,T,2,A,S) -> beamspace (transform acts on last 3 dims)
+        beam = self._to(o)                      # (B,T,2,A,S) -> working domain (beamspace or raw)
         k = random.randint(horizon_range[0], min(horizon_range[1], T - 2))
         anchor = T - 1 - k
 
         x, z, h = self.encode(beam, a)
 
-        # --- prediction loss: predict future beam channel k ahead ---
+        # --- prediction loss: predict future channel k ahead (in the working domain) ---
         b_pred = self.predict_beam(z[:, anchor], h[:, anchor], a[:, anchor:anchor + k])
         b_future = beam[:, anchor + k]
         loss_pred = F.mse_loss(b_pred, b_future)
@@ -150,15 +220,17 @@ class BeamWorldModel(nn.Module):
         snr = torch.empty(H_clean.shape[0], 1, 1, 1, device=o.device).uniform_(lo, hi)
         nvar = power / (10 ** (snr / 10))
         Y = H_clean + torch.randn(H_clean.shape, generator=noise_gen, device=o.device) * nvar.sqrt()
-        obs_beam = to_beamspace(Y)
-        # prior for current step: predict from p steps back using clean history
-        p = min(2, anchor)
-        if p >= 1:
-            prior_beam = self.predict_beam(z[:, anchor - p], h[:, anchor - p], a[:, anchor - p:anchor])
+        obs_beam = self._to(Y)
+        prior_beam = self._prior(z, h, a, anchor, obs_beam, beam)
+        if self.sparse_stride > 1:
+            # SPARSE PILOTS: only 1-in-stride subcarriers observed; fuse in H-domain (mask-aware).
+            mask = self.comb_mask(cfg.n_subcarriers, self.sparse_stride, o.device)
+            Y_masked = Y * mask
+            prior_H = self._from(prior_beam).detach()
+            H_hat = self.estimate_sparse(Y_masked, prior_H, mask, nvar.reshape(-1))
         else:
-            prior_beam = torch.zeros_like(obs_beam)
-        est_beam = self.estimate(obs_beam, prior_beam.detach(), nvar.reshape(-1))
-        H_hat = from_beamspace(est_beam)
+            est_beam = self.estimate(obs_beam, prior_beam.detach(), nvar.reshape(-1))
+            H_hat = self._from(est_beam)
         loss_chan = F.mse_loss(H_hat, H_clean)
 
         total = loss_pred + 5.0 * loss_chan
@@ -170,17 +242,34 @@ class BeamWorldModel(nn.Module):
     @torch.no_grad()
     def estimate_channel(self, o_seq, a, snr_db, noise_gen=None):
         """Inference: estimate the current (last-frame) channel from a noisy obs + history prior."""
-        beam = to_beamspace(o_seq)
+        beam = self._to(o_seq)
         x, z, h = self.encode(beam, a)
         t = o_seq.shape[1] - 1
         H_clean = o_seq[:, t]
         power = H_clean.pow(2).mean(dim=(1, 2, 3), keepdim=True)
         nvar = power / (10 ** (snr_db / 10))
         Y = H_clean + torch.randn(H_clean.shape, generator=noise_gen, device=o_seq.device) * nvar.sqrt()
-        p = min(2, t)
-        prior_beam = self.predict_beam(z[:, t - p], h[:, t - p], a[:, t - p:t]) if p >= 1 else torch.zeros_like(to_beamspace(Y))
-        est_beam = self.estimate(to_beamspace(Y), prior_beam, nvar.reshape(-1))
-        return from_beamspace(est_beam), H_clean
+        obs_beam = self._to(Y)
+        prior_beam = self._prior(z, h, a, t, obs_beam, beam)
+        est_beam = self.estimate(obs_beam, prior_beam, nvar.reshape(-1))
+        return self._from(est_beam), H_clean
+
+    @torch.no_grad()
+    def estimate_channel_sparse(self, o_seq, a, snr_db, stride, noise_gen=None):
+        """Sparse-pilot inference: observe only 1-in-`stride` subcarriers, fuse with the prior."""
+        beam = self._to(o_seq)
+        x, z, h = self.encode(beam, a)
+        t = o_seq.shape[1] - 1
+        H_clean = o_seq[:, t]
+        power = H_clean.pow(2).mean(dim=(1, 2, 3), keepdim=True)
+        nvar = power / (10 ** (snr_db / 10))
+        Y = H_clean + torch.randn(H_clean.shape, generator=noise_gen, device=o_seq.device) * nvar.sqrt()
+        mask = self.comb_mask(self.config.n_subcarriers, stride, o_seq.device)
+        Y_masked = Y * mask
+        prior_beam = self._prior(z, h, a, t, self._to(Y), beam)
+        prior_H = self._from(prior_beam)
+        H_hat = self.estimate_sparse(Y_masked, prior_H, mask, nvar.reshape(-1))
+        return H_hat, H_clean, Y_masked, mask
 
     def forward(self, o, a, **kw):
         return self.losses(o, a, **kw)
