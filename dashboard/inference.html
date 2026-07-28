@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en" data-palette="#3987e5,#d95926,#9085e9,#199e70">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Beam-WM · Real-Time Inference</title>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
+<style>
+  /* ---- dark surface + validated categorical palette (CVD-checked) ---- */
+  :root{
+    --surface-1:#1a1a19; --surface-2:#232322; --surface-3:#2c2c2a;
+    --text-1:#ffffff; --text-2:#c3c2b7; --text-mut:#87867d; --grid:#34342f;
+    --truth:#3987e5;   /* ground truth  */
+    --pred:#d95926;    /* prediction / estimate */
+    --obs:#9085e9;     /* noisy observation */
+    --aqua:#199e70;    /* secondary / good */
+    --red:#e66767;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;background:var(--surface-1);color:var(--text-1);
+    font-family:-apple-system,Segoe UI,Inter,Roboto,sans-serif;font-size:14px;}
+  header{padding:16px 26px;border-bottom:1px solid var(--grid);display:flex;
+    justify-content:space-between;align-items:center;background:var(--surface-2);}
+  h1{margin:0;font-size:17px;font-weight:700;letter-spacing:.2px;}
+  h1 b{color:var(--truth);}
+  .sub{color:var(--text-mut);font-size:12px;margin-top:3px;}
+  .badge{font-size:12px;color:var(--text-2);border:1px solid var(--grid);border-radius:20px;padding:6px 13px;}
+  .live{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--aqua);
+    margin-right:6px;animation:pulse 1.5s infinite;} @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+  .wrap{padding:20px 26px;display:grid;gap:16px;grid-template-columns:repeat(12,1fr);max-width:1560px;margin:auto;}
+  .card{background:var(--surface-2);border:1px solid var(--grid);border-radius:12px;padding:15px 17px;}
+  .card h2{margin:0 0 10px;font-size:12px;font-weight:600;letter-spacing:.4px;
+    color:var(--text-2);text-transform:uppercase;}
+  .c12{grid-column:span 12;}.c8{grid-column:span 8;}.c7{grid-column:span 7;}
+  .c6{grid-column:span 6;}.c5{grid-column:span 5;}.c4{grid-column:span 4;}.c3{grid-column:span 3;}
+  @media(max-width:1100px){.wrap{grid-template-columns:repeat(6,1fr);}.c8,.c7,.c6,.c5,.c4,.c3{grid-column:span 6;}}
+  .kpi{background:var(--surface-3);border:1px solid var(--grid);border-radius:12px;padding:13px 15px;}
+  .kpi .v{font-size:25px;font-weight:800;font-variant-numeric:tabular-nums;}
+  .kpi .l{font-size:11px;color:var(--text-mut);margin-top:3px;text-transform:uppercase;letter-spacing:.4px;}
+  canvas.plot{width:100%;height:230px;display:block;}
+  #scene3d{width:100%;height:340px;border-radius:8px;display:block;background:#0f0f0e;}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--text-2);margin-top:9px;}
+  .legend span{display:inline-flex;align-items:center;gap:6px;}
+  .swatch{width:14px;height:3px;border-radius:2px;display:inline-block;}
+  .swatch.d{width:9px;height:9px;border-radius:2px;}
+  .ctl{display:flex;gap:12px;align-items:center;flex-wrap:wrap;}
+  button,select{background:var(--surface-3);color:var(--text-1);border:1px solid var(--grid);
+    border-radius:7px;padding:7px 13px;font-size:13px;cursor:pointer;}
+  button:hover{border-color:var(--truth);}
+  button.primary{background:var(--truth);border-color:var(--truth);color:#fff;font-weight:600;}
+  input[type=range]{accent-color:var(--truth);}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums;}
+  th,td{text-align:right;padding:6px 9px;border-bottom:1px solid var(--grid);}
+  th:first-child,td:first-child{text-align:left;color:var(--text-mut);}
+  .win{color:var(--aqua);font-weight:700;}
+  .tip{position:fixed;pointer-events:none;background:var(--surface-3);border:1px solid var(--grid);
+    border-radius:7px;padding:7px 10px;font-size:12px;opacity:0;transition:opacity .08s;z-index:9;
+    box-shadow:0 4px 18px #0008;font-variant-numeric:tabular-nums;}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1><b>Beam-WM</b> · Real-Time Channel Inference on Sionna RT</h1>
+    <div class="sub" id="hsub">loading trace…</div>
+  </div>
+  <div class="badge"><span class="live"></span><span id="clock">t = 0</span></div>
+</header>
+
+<div class="wrap">
+  <!-- KPI row -->
+  <div class="c3 kpi"><div class="v" id="k_est" style="color:var(--pred)">–</div><div class="l">Est. NMSE (live)</div></div>
+  <div class="c3 kpi"><div class="v" id="k_snr" style="color:var(--truth)">–</div><div class="l">Pilot SNR</div></div>
+  <div class="c3 kpi"><div class="v" id="k_pilots" style="color:var(--obs)">–</div><div class="l">Pilots observed</div></div>
+  <div class="c3 kpi"><div class="v" id="k_spd" style="color:var(--aqua)">–</div><div class="l">RX speed</div></div>
+
+  <!-- 3D scene + controls -->
+  <div class="c5 card">
+    <h2>Receiver trajectory · beamspace world model</h2>
+    <canvas id="scene3d"></canvas>
+    <div class="ctl" style="margin-top:11px">
+      <button id="play" class="primary">▶ Play</button>
+      <button id="step">Step ▸</button>
+      <button id="reset">⟲</button>
+      <select id="seqSel"></select>
+      <label class="sub">speed <input id="rate" type="range" min="200" max="1400" value="700" step="100" style="vertical-align:middle"></label>
+    </div>
+    <div class="legend">
+      <span><i class="swatch d" style="background:var(--red)"></i>transmitter</span>
+      <span><i class="swatch d" style="background:var(--aqua)"></i>RX (past)</span>
+      <span><i class="swatch d" style="background:var(--pred)"></i>RX (now)</span>
+    </div>
+  </div>
+
+  <!-- Estimation: live per-subcarrier -->
+  <div class="c7 card">
+    <h2>Channel estimation · magnitude vs subcarrier (current step)</h2>
+    <canvas id="cEst" class="plot"></canvas>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--truth)"></i>ground truth</span>
+      <span><i class="swatch" style="background:var(--obs)"></i>noisy sparse pilots</span>
+      <span><i class="swatch" style="background:var(--pred)"></i>Beam-WM estimate</span>
+    </div>
+  </div>
+
+  <!-- Estimation NMSE over time (fills in) -->
+  <div class="c6 card">
+    <h2>Estimation NMSE as the receiver moves</h2>
+    <canvas id="cNmse" class="plot"></canvas>
+    <div class="legend"><span><i class="swatch" style="background:var(--pred)"></i>Beam-WM estimate NMSE (log)</span></div>
+  </div>
+
+  <!-- Prediction horizon (aggregate, honest) -->
+  <div class="c6 card">
+    <h2>Channel prediction · NMSE vs horizon (test-set average)</h2>
+    <canvas id="cPred" class="plot"></canvas>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--truth)"></i>Beam-WM</span>
+      <span><i class="swatch" style="background:var(--obs)"></i>AR(1)</span>
+      <span><i class="swatch" style="background:var(--pred)"></i>persistence</span>
+    </div>
+  </div>
+
+  <!-- Heatmaps: truth vs estimate grid -->
+  <div class="c6 card">
+    <h2>Ground-truth channel |H| · antenna × subcarrier</h2>
+    <canvas id="hTruth" class="plot" style="height:200px"></canvas>
+  </div>
+  <div class="c6 card">
+    <h2>Beam-WM estimate |Ĥ| · antenna × subcarrier</h2>
+    <canvas id="hEst" class="plot" style="height:200px"></canvas>
+  </div>
+</div>
+<div class="tip" id="tip"></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const C = { truth:'#3987e5', pred:'#d95926', obs:'#9085e9', aqua:'#199e70', red:'#e66767',
+            grid:'#34342f', txt2:'#c3c2b7', mut:'#87867d', surf:'#1a1a19' };
+const $ = id => document.getElementById(id);
+const tip = $('tip');
+
+let TRACE=null, seq=null, tPlay=1, playing=false, timer=null;
+
+// ---------- generic canvas line plot with crosshair ----------
+function hidpi(cv){ const r=devicePixelRatio||1, b=cv.getBoundingClientRect();
+  cv.width=b.width*r; cv.height=b.height*r; const x=cv.getContext('2d'); x.setTransform(r,0,0,r,0,0);
+  return {x, W:b.width, H:b.height}; }
+
+function axes(x,W,H,pad,xr,yr,{ylog=false,xlab='',ylab=''}={}){
+  x.clearRect(0,0,W,H);
+  x.strokeStyle=C.grid; x.fillStyle=C.mut; x.lineWidth=1; x.font='11px Inter,sans-serif';
+  const [x0,x1]=xr,[y0,y1]=yr;
+  const px=v=>pad.l+(v-x0)/(x1-x0)*(W-pad.l-pad.r);
+  const yv=v=> ylog? (Math.log10(Math.max(v,1e-6))-Math.log10(y0))/(Math.log10(y1)-Math.log10(y0)) : (v-y0)/(y1-y0);
+  const py=v=>H-pad.b-yv(v)*(H-pad.t-pad.b);
+  const yticks = ylog? [1e-3,1e-2,1e-1,1] : [y0,(y0+y1)/2,y1];
+  yticks.forEach(v=>{ if(v<y0||v>y1)return; const Y=py(v);
+    x.strokeStyle=C.grid; x.beginPath();x.moveTo(pad.l,Y);x.lineTo(W-pad.r,Y);x.stroke();
+    x.fillStyle=C.mut; x.textAlign='right'; x.fillText(ylog?v.toExponential(0):v.toFixed(2),pad.l-6,Y+3);});
+  x.textAlign='center';
+  return {px,py};
+}
+function line(x,pts,color,{w=2,dash=null,fillToBase=null,map}={}){
+  if(!pts.length)return; x.save(); x.strokeStyle=color;x.lineWidth=w;if(dash)x.setLineDash(dash);
+  x.beginPath(); pts.forEach((p,i)=>{const X=map.px(p[0]),Y=map.py(p[1]); i?x.lineTo(X,Y):x.moveTo(X,Y);});
+  x.stroke(); x.setLineDash([]); x.restore();
+}
+function dots(x,pts,color,map,r=3){ x.fillStyle=color; pts.forEach(p=>{x.beginPath();
+  x.arc(map.px(p[0]),map.py(p[1]),r,0,7);x.fill();}); }
+
+// ---------- estimation per-subcarrier plot (animated) ----------
+function drawEst(step){
+  const cv=$('cEst'), {x,W,H}=hidpi(cv); const pad={l:44,r:12,t:12,b:26};
+  const S=seq.n_sub, maxY=Math.max(...step.truth_mag,...step.obs_mag,...step.est_mag)*1.1||1;
+  const m=axes(x,W,H,pad,[0,S-1],[0,maxY],{});
+  x.fillStyle=C.mut;x.textAlign='center';x.fillText('subcarrier',W/2,H-4);
+  const mk=arr=>arr.map((v,i)=>[i,v]);
+  // noisy obs: only observed (nonzero) pilots, as markers
+  const obs=step.obs_mag.map((v,i)=>[i,v]).filter(p=>p[1]>1e-4);
+  line(x,mk(step.truth_mag),C.truth,{w:2,map:m});
+  line(x,mk(step.est_mag),C.pred,{w:2,map:m});
+  dots(x,obs,C.obs,m,3.2);
+  cv.onmousemove=e=>{const b=cv.getBoundingClientRect();const fx=e.clientX-b.left;
+    const S=seq.n_sub,pad={l:44,r:12}; const i=Math.round((fx-pad.l)/(b.width-pad.l-pad.r)*(S-1));
+    if(i<0||i>=S){tip.style.opacity=0;return;}
+    tip.innerHTML=`sc ${i}<br><b style="color:${C.truth}">truth</b> ${step.truth_mag[i].toFixed(3)}<br><b style="color:${C.pred}">est</b> ${step.est_mag[i].toFixed(3)}`;
+    tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+8)+'px';tip.style.opacity=1;};
+  cv.onmouseleave=()=>tip.style.opacity=0;
+}
+
+// ---------- estimation NMSE over time (fills to current step) ----------
+function drawNmse(uptoIdx){
+  const cv=$('cNmse'), {x,W,H}=hidpi(cv); const pad={l:52,r:12,t:12,b:26};
+  const est=seq.estimate; const xr=[est[0].t,est[est.length-1].t];
+  const m=axes(x,W,H,pad,xr,[1e-3,1],{ylog:true}); x.fillStyle=C.mut;x.textAlign='center';x.fillText('time step',W/2,H-4);
+  const pts=est.slice(0,uptoIdx+1).map(e=>[e.t,e.nmse]);
+  line(x,pts,C.pred,{w:2,map:m}); dots(x,pts,C.pred,m,3);
+  if(pts.length){const last=pts[pts.length-1];x.fillStyle=C.pred;x.textAlign='left';
+    x.fillText(last[1].toFixed(3),m.px(last[0])+6,m.py(last[1])-4);}
+}
+
+// ---------- prediction horizon (static, honest aggregate) ----------
+function drawPred(){
+  const cv=$('cPred'), {x,W,H}=hidpi(cv); const pad={l:44,r:12,t:12,b:26};
+  const ph=TRACE.paper_horizon, K=ph.model.length;
+  const m=axes(x,W,H,pad,[1,K],[0,0.65],{}); x.fillStyle=C.mut;x.textAlign='center';x.fillText('prediction horizon k',W/2,H-4);
+  const mk=a=>a.map((v,i)=>[i+1,v]);
+  line(x,mk(ph.persist),C.pred,{w:2,dash:[4,4],map:m});
+  line(x,mk(ph.ar1),C.obs,{w:2,dash:[4,4],map:m});
+  line(x,mk(ph.model),C.truth,{w:2.5,map:m}); dots(x,mk(ph.model),C.truth,m,3.5);
+}
+
+// ---------- heatmap ----------
+function heat(cvid,grid){
+  const cv=$(cvid),{x,W,H}=hidpi(cv); const A=grid.length,S=grid[0].length;
+  let mx=0; grid.forEach(r=>r.forEach(v=>mx=Math.max(mx,v))); mx=mx||1;
+  const pad={l:30,t:6,b:6,r:6}; const cw=(W-pad.l-pad.r)/S, ch=(H-pad.t-pad.b)/A;
+  x.clearRect(0,0,W,H);
+  for(let a=0;a<A;a++)for(let s=0;s<S;s++){const v=grid[a][s]/mx;
+    // sequential aqua ramp on dark surface
+    const l=0.12+0.62*v; x.fillStyle=`oklch(${l} ${0.02+0.13*v} 165)`;
+    x.fillRect(pad.l+s*cw, pad.t+a*ch, cw-0.6, ch-0.6);}
+  x.fillStyle=C.mut;x.font='10px Inter';x.textAlign='right';
+  for(let a=0;a<A;a+=2)x.fillText('a'+a,pad.l-4,pad.t+a*ch+ch);
+}
+
+// ---------- 3D scene ----------
+let renderer,scene3,cam,ctrl,rxDots=[],rxNow;
+function init3d(){
+  const cv=$('scene3d'); renderer=new THREE.WebGLRenderer({canvas:cv,antialias:true});
+  renderer.setPixelRatio(devicePixelRatio); renderer.setSize(cv.clientWidth,cv.clientHeight,false);
+  scene3=new THREE.Scene(); scene3.background=new THREE.Color(0x0f0f0e);
+  cam=new THREE.PerspectiveCamera(52,cv.clientWidth/cv.clientHeight,0.1,500);
+  cam.position.set(9,7,11);
+  ctrl=new OrbitControls(cam,renderer.domElement); ctrl.enableDamping=true;
+  scene3.add(new THREE.AmbientLight(0xffffff,0.7));
+  const dl=new THREE.DirectionalLight(0xffffff,0.6);dl.position.set(5,10,7);scene3.add(dl);
+  // ground grid = street plane
+  const g=new THREE.GridHelper(20,20,0x34342f,0x232322); scene3.add(g);
+  (function loop(){requestAnimationFrame(loop);ctrl.update();renderer.render(scene3,cam);})();
+}
+function buildScene(){
+  if(!has3d) return;
+  // clear old dynamic objects
+  rxDots.forEach(o=>scene3.remove(o)); rxDots=[];
+  if(rxNow) scene3.remove(rxNow);
+  // TX (fixed, elevated)
+  const tx=new THREE.Mesh(new THREE.ConeGeometry(0.5,1.4,4),new THREE.MeshStandardMaterial({color:C.red,emissive:0x5a1414}));
+  tx.position.set(0,4,0); tx.rotation.x=Math.PI; scene3.add(tx); rxDots.push(tx);
+  const t=new THREE.Sprite(); // (skip text sprite; keep light)
+  // trajectory path
+  const pts=seq.traj.map(p=>new THREE.Vector3(p[0],p[2]*0.6,p[1]));
+  const geo=new THREE.BufferGeometry().setFromPoints(pts);
+  const pathLine=new THREE.Line(geo,new THREE.LineBasicMaterial({color:C.aqua,transparent:true,opacity:0.5}));
+  scene3.add(pathLine); rxDots.push(pathLine);
+  // RX dots along path
+  seq.traj.forEach((p,i)=>{const d=new THREE.Mesh(new THREE.SphereGeometry(0.16,16,16),
+    new THREE.MeshStandardMaterial({color:C.aqua})); d.position.set(p[0],p[2]*0.6,p[1]);
+    d.visible=false; scene3.add(d); rxDots.push(d);});
+  rxNow=new THREE.Mesh(new THREE.SphereGeometry(0.28,20,20),
+    new THREE.MeshStandardMaterial({color:C.pred,emissive:0x662712})); scene3.add(rxNow);
+  // frame camera
+  const c=pts[Math.floor(pts.length/2)]; ctrl.target.copy(c);
+}
+function update3d(step){
+  if(!has3d) return;
+  // reveal RX dots up to current time, move the "now" marker
+  const upto=step; let di=2; // rxDots[0]=tx, [1]=path, then dots
+  seq.traj.forEach((p,i)=>{ const dot=rxDots[2+i]; if(dot) dot.visible=(i<=upto); });
+  const p=seq.traj[Math.min(upto,seq.traj.length-1)];
+  if(rxNow) rxNow.position.set(p[0],p[2]*0.6,p[1]);
+}
+
+// ---------- player ----------
+let stepIdx=0;
+function render(){
+  const est=seq.estimate; const e=est[Math.min(stepIdx,est.length-1)];
+  drawEst(e); drawNmse(stepIdx); heat('hTruth',e.truth_grid); heat('hEst',e.est_grid);
+  update3d(e.t);
+  $('k_est').textContent=e.nmse.toFixed(4);
+  $('clock').textContent='t = '+e.t;
+}
+function play(){ if(playing)return; playing=true; $('play').textContent='❚❚ Pause';
+  timer=setInterval(()=>{ stepIdx++; if(stepIdx>=seq.estimate.length){stepIdx=seq.estimate.length-1;pause();return;} render(); }, +$('rate').value ); }
+function pause(){ playing=false; $('play').textContent='▶ Play'; clearInterval(timer); }
+
+function loadSeq(i){
+  seq=TRACE.sequences[i]; stepIdx=0;
+  $('k_snr').textContent=TRACE.snr_db+' dB';
+  $('k_pilots').textContent=Math.round(100/TRACE.stride)+'%';
+  $('k_spd').textContent=seq.speed.toFixed(2);
+  $('hsub').textContent=`scene: ${TRACE.scene} · Nₐ=${TRACE.n_ant} · N_sc=${TRACE.n_sub} · pilots ${Math.round(100/TRACE.stride)}% · heading ${seq.heading_deg}°`;
+  buildScene(); drawPred(); render();
+}
+
+let has3d=false;
+async function main(){
+  try{ init3d(); has3d=true; }
+  catch(e){ console.warn('3D unavailable (no WebGL):',e.message);
+    const cv=$('scene3d'); const g=cv.getContext('2d');
+    if(g){g.fillStyle='#0f0f0e';g.fillRect(0,0,cv.width,cv.height);
+      g.fillStyle=C.mut;g.font='13px Inter';g.textAlign='center';
+      g.fillText('3D scene needs WebGL (open in a browser)',cv.width/2,cv.height/2);} }
+  const r=await fetch('trace.json?_='+Date.now()); TRACE=await r.json();
+  const sel=$('seqSel'); TRACE.sequences.forEach((s,i)=>{const o=document.createElement('option');
+    o.value=i;o.textContent=`sequence ${i+1} · v=${s.speed.toFixed(2)}`;sel.appendChild(o);});
+  sel.onchange=()=>{pause();loadSeq(+sel.value);};
+  $('play').onclick=()=>playing?pause():play();
+  $('step').onclick=()=>{pause(); if(stepIdx<seq.estimate.length-1){stepIdx++;render();}};
+  $('reset').onclick=()=>{pause();stepIdx=0;render();};
+  addEventListener('resize',()=>render());
+  loadSeq(0);
+}
+main().catch(e=>{ $('hsub').textContent='ERROR: '+e.message;
+  console.error('dashboard main() failed:',e); });
+</script>
+</body>
+</html>
