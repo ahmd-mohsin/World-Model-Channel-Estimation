@@ -23,9 +23,12 @@ def main():
     ap.add_argument("--seq_len", type=int, default=8)     # sequence length T
     ap.add_argument("--speed_lo", type=float, default=0.5)  # per-sequence speed multiplier range
     ap.add_argument("--speed_hi", type=float, default=1.5)  # widen to stress under-represented dynamics
+    ap.add_argument("--n_ant", type=int, default=8)         # antennas (32/64 = massive-MIMO)
+    ap.add_argument("--n_sub", type=int, default=32)        # subcarriers
     args = ap.parse_args()
 
-    cfg = SSWMConfig(n_subcarriers=32, n_antennas=8, seq_len=args.seq_len, horizon_k=3, use_pretrained=False)
+    cfg = SSWMConfig(n_subcarriers=args.n_sub, n_antennas=args.n_ant, seq_len=args.seq_len,
+                     horizon_k=3, use_pretrained=False)
     import drjit as dr
     import sionna.rt as rt
 

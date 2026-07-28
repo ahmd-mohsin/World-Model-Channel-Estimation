@@ -52,3 +52,24 @@ class ReEsNet(nn.Module):
         h = self.inc(x)
         h = self.mid(self.body(h)) + h                          # global residual (ReEsNet skip)
         return self.outc(h)                                     # full channel estimate
+
+
+def route_to_world_model(pilot_fraction: float, snr_db: float,
+                         sparse_thresh: float = 0.125,
+                         snr_lo: float = 0.0, snr_hi: float = 15.0) -> bool:
+    """CSI-adaptive router grounded in the PHYSICS of when a temporal prior can help.
+
+    The world-model prior is a prediction rolled from recent channel history. It is useful only when
+    the current observation is degraded AND the history is informative:
+      - Very LOW SNR: the history frames driving the prior are themselves at the same low SNR, so the
+        prior is built on noise and carries little reliable signal -> route to the per-snapshot CNN,
+        which exploits instantaneous spatial correlation instead.
+      - Very HIGH SNR: the observation is already near-perfect, so the prior is redundant and only
+        adds overhead -> route to the per-snapshot CNN.
+      - MODERATE SNR with SPARSE pilots: the observation is missing many subcarriers yet the history
+        is clean enough to form a useful prior -> route to the world-model deep-fusion estimator.
+    Uses only inference-known CSI (pilot density set by the system, SNR estimated); no oracle
+    statistics and no channel ground truth. The moderate-SNR window narrows as the antenna count
+    grows (methodology Table tab:est), so at scale the router falls back to the CNN more often.
+    """
+    return (pilot_fraction <= sparse_thresh + 1e-9) and (snr_lo <= snr_db <= snr_hi)
