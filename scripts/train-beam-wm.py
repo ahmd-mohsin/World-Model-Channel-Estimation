@@ -27,6 +27,8 @@ def main():
     ap.add_argument("--tag", default="beam")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--ablate", default="full", choices=list(BeamWorldModel.ABLATIONS))
+    ap.add_argument("--n_ant", type=int, default=8)
+    ap.add_argument("--n_sub", type=int, default=32)
     args = ap.parse_args()
     torch.manual_seed(args.seed)
 
@@ -35,7 +37,7 @@ def main():
     torch.cuda.set_device(local); dev = f"cuda:{local}"
     main_rank = rank == 0
 
-    cfg = SSWMConfig(n_subcarriers=32, n_antennas=8, seq_len=8, horizon_k=3, action_dim=4,
+    cfg = SSWMConfig(n_subcarriers=args.n_sub, n_antennas=args.n_ant, seq_len=8, horizon_k=3, action_dim=4,
                      embed_dim=128, state_dim=64, latent_dim=128, use_pretrained=False, unet_base_ch=48)
     ds = ShardDataset(args.data_dir, cfg, test_frac=0.05, seed=args.seed, holdout_scene=args.holdout_scene)
     if main_rank:

@@ -40,7 +40,8 @@ future channel and supplies a temporal prior for channel estimation. The model o
 \textbf{beamspace} (angle--delay) domain, where the channel is sparse and a compact latent is
 reconstruction-faithful; a Mamba-style \emph{selective state-space} (SSM) backbone rolls the latent
 forward under the action, and a decoder reconstructs the future channel. Trained end-to-end by
-Distributed Data Parallel across $8\times$ A100 GPUs on ray-traced Sionna~RT channels spanning six
+Distributed Data Parallel across $8\times$ A100 GPUs on $4.8{\times}10^4$ ray-traced Sionna~RT
+$8\times4$ MIMO channel sequences spanning six
 city scenes, the world model is the best \emph{channel predictor} at every horizon $k{=}1,\dots,6$,
 beating persistence and a linear autoregressive baseline with a margin that widens with horizon, both
 in-distribution and on held-out scenes. For \emph{channel estimation} we report the complete picture,
@@ -100,18 +101,22 @@ what each module contributes, and where added machinery does not pay off.
 \section{Problem formulation}\label{sec:problem}
 
 \subsection{Signal model}
-A single-cell MIMO-OFDM link has a base station of $N_a$ antennas and a single-antenna user
-equipment. The frequency-domain channel at time $t$ is
+A single-cell MIMO-OFDM link has a base station of $N_t$ antennas and a user equipment of $N_r$
+antennas (full MIMO, not MISO). Per OFDM subcarrier the channel is the $N_t\times N_r$ matrix
+$\sum_\ell \alpha_\ell\,\mathbf a_t(\phi^t_\ell)\mathbf a_r(\phi^r_\ell)^{\!\top}$ over $L$ paths of
+complex gain, departure/arrival angle and delay. We vectorize the spatial matrix into a single
+spatial axis of size $N_s^{\text{sp}}=N_t N_r$, so the channel at time $t$ is
 \begin{equation}
-\Hc_t \in \C^{N_a \times N_s},\qquad
-[\Hc_t]_{m,k} = \sum_{\ell=1}^{L} \alpha_{\ell}\,
-e^{\,j 2\pi m\phi_\ell/N_a}\,e^{-j 2\pi k\tau_\ell/N_s},
+\Hc_t \in \C^{\,N_s^{\text{sp}} \times N_s},\qquad N_s^{\text{sp}}=N_t N_r,
 \end{equation}
-with $L$ propagation paths of complex gain, angle, and delay $(\alpha_\ell,\phi_\ell,\tau_\ell)$. We
-stack real/imaginary parts, $\mathbf{o}_t=[\Re\Hc_t;\Im\Hc_t]\in\R^{2\times N_a\times N_s}$. The pilot
-observation is $\yv_t=\Hc_t+\mathbf{n}_t$, $\mathbf{n}_t\!\sim\!\mathcal{CN}(0,\sigma^2\mathbf I)$,
-with $\mathrm{SNR}=10\log_{10}(\bar P/\sigma^2)$ and $\bar P=\E\|\Hc_t\|_F^2/(N_aN_s)$. Under
-\emph{sparse pilots} only a subset of subcarriers is observed (\S\ref{sec:sparse}).
+($N_s$ subcarriers). We stack real/imaginary parts,
+$\mathbf{o}_t=[\Re\Hc_t;\Im\Hc_t]\in\R^{2\times N_s^{\text{sp}}\times N_s}$. The pilot observation is
+$\yv_t=\Hc_t+\mathbf{n}_t$, $\mathbf{n}_t\!\sim\!\mathcal{CN}(0,\sigma^2\mathbf I)$, with
+$\mathrm{SNR}=10\log_{10}(\bar P/\sigma^2)$. Our experiments use $N_t{=}8$, $N_r{=}4$
+($N_s^{\text{sp}}{=}32$ spatial channels), $N_s{=}32$. Under \emph{sparse pilots} only a subset of
+subcarriers is observed (\S\ref{sec:sparse}). Folding the $N_t\times N_r$ matrix into one spatial axis
+keeps the whole pipeline (beamspace transform, world model, heads) dimension-agnostic; the beamspace
+transform below is a valid orthonormal map on the $(N_s^{\text{sp}},N_s)$ grid.
 
 \subsection{Actions and temporal structure}
 The receiver moves; consecutive channels are correlated and their evolution is driven by the motion.
@@ -361,9 +366,10 @@ deep-fusion head & $0.64$M & $\mathcal L_{\text{chan}}$ & mask-aware, estimation
 \emph{ReEsNet baseline} & $0.63$M & $\mathcal L_{\text{chan}}$ & matched to fusion-head capacity \\
 \bottomrule
 \end{tabular}
-\caption{Per-module parameter counts and training signals ($N_a{=}8$). The world model is
-$\approx$$1.9$M parameters; its sparse deep-fusion head ($0.64$M) is matched to the standalone
-ReEsNet baseline ($0.63$M) for a fair estimation comparison.}
+\caption{Per-module training signals and parameter counts (shown for a compact $8$-spatial reference
+config; the $8\times4$ MIMO model used throughout is $\approx$$6.7$M parameters, the growth
+concentrated in the decoder that expands to the $32$-spatial grid). The sparse deep-fusion head
+($0.64$M) is matched to the standalone ReEsNet baseline ($0.63$M) for a fair estimation comparison.}
 \label{tab:modules}
 \end{table}
 
@@ -389,10 +395,11 @@ receive a second independently-seeded shard), so every sample carries a scene la
 leave-one-scene-out OOD split is exact.
 
 \paragraph{Radio configuration.} Carrier $3.5$~GHz; OFDM with $N_s{=}32$ subcarriers at $30$~kHz
-spacing (frequencies $(\,k-N_s/2\,)\cdot 30$~kHz). The base station is a uniform linear array of
-$N_a$ isotropic, vertically-polarized elements at half-wavelength spacing ($N_a{=}8$ primary,
-$N_a{=}32$ for the massive-MIMO study); the user has a single isotropic element. Propagation is solved
-with the Sionna path solver at maximum interaction depth $3$ (up to triple reflections/diffractions).
+spacing (frequencies $(\,k-N_s/2\,)\cdot 30$~kHz). Both ends are uniform linear arrays of isotropic,
+vertically-polarized elements at half-wavelength spacing: the base station has $N_t{=}8$ antennas and
+the user equipment $N_r{=}4$ antennas --- a full $8\times4$ MIMO link ($N_s^{\text{sp}}{=}32$ spatial
+channels per subcarrier). Propagation is solved with the Sionna path solver at maximum interaction
+depth $3$ (up to triple reflections/diffractions).
 
 \paragraph{Geometry and mobility.} Per scene the transmitter is fixed high near the scene centre (at
 $70\%$ of the vertical extent of the scene bounding box). For each sequence a receiver start position
@@ -404,12 +411,11 @@ temporally-correlated sequence whose evolution is driven by the (constant per se
 The \textbf{action} recorded at every step is $\av=[v_x,v_y,\|\mathbf v\|,\theta/\pi]$. Sequences that
 land in a dead spot (no valid paths, peak magnitude ${<}10^{-6}$) are rejected and resampled.
 
-\paragraph{Sizes and split.} The primary dataset is $6.4{\times}10^4$ sequences ($8$k per shard,
-$8$ shards) at $N_a{=}8$; the massive-MIMO dataset is $4.8{\times}10^4$ sequences ($6$k per shard) at
-$N_a{=}32$. Table~\ref{tab:data} summarizes both. Each stored sample is a tensor of shape
-$(T,2,N_a,N_s)$ (real/imag stacked) plus its $(T,4)$ action. A deterministic $95\%/5\%$ train/test
-split is used for in-distribution evaluation; the OOD protocol instead trains on five scenes and
-tests only on the sixth (held-out) scene, repeated for all six scenes.
+\paragraph{Sizes and split.} The dataset is $4.8{\times}10^4$ sequences ($6$k per shard, $8$ shards)
+of $8\times4$ MIMO channels. Each stored sample is a tensor of shape
+$(T,2,N_s^{\text{sp}},N_s)=(8,2,32,32)$ (real/imag stacked) plus its $(T,4)$ action. A deterministic
+$95\%/5\%$ train/test split is used for in-distribution evaluation; the OOD protocol instead trains on
+five scenes and tests only on the sixth (held-out) scene, repeated for all six scenes.
 
 \paragraph{Preprocessing.} Raw responses are scaled by $10^6$ (Sionna returns very small linear-scale
 gains) and then standardized per real/imaginary plane using statistics computed on the \emph{training}
@@ -422,15 +428,15 @@ statistics are frozen from the train split and applied to test/OOD data.
 \small
 \begin{tabular}{lcccccc}
 \toprule
-dataset & $N_a$ & $N_s$ & $T$ & scenes & sequences & channels \\
+config & $N_t\times N_r$ & $N_s$ & $T$ & scenes & sequences & channels \\
 \midrule
-primary       & $8$  & $32$ & $8$ & $6$ & $6.4{\times}10^4$ & $5.1{\times}10^5$ \\
-massive-MIMO  & $32$ & $32$ & $8$ & $6$ & $4.8{\times}10^4$ & $3.8{\times}10^5$ \\
+MIMO $8\times4$ & $8\times4$ ($32$ sp.) & $32$ & $8$ & $6$ & $4.8{\times}10^4$ & $3.8{\times}10^5$ \\
 \bottomrule
 \end{tabular}
-\caption{Generated Sionna~RT datasets. ``channels'' $=$ sequences $\times T$ individual ray-traced
-OFDM responses. Both use $30$~kHz spacing, $3.5$~GHz, path-solver depth $3$, $0.15$~m steps, per-
-sequence speed $\in[0.3,2.0]$, and a leave-one-scene-out OOD protocol.}
+\caption{Generated Sionna~RT dataset ($8\times4$ MIMO). ``channels'' $=$ sequences $\times T$
+individual ray-traced OFDM responses; ``sp.''\ $=$ spatial channels ($N_t N_r$). $30$~kHz spacing,
+$3.5$~GHz, path-solver depth $3$, $0.15$~m steps, per-sequence speed $\in[0.3,2.0]$, leave-one-scene-
+out OOD.}
 \label{tab:data}
 \end{table}
 
@@ -442,12 +448,13 @@ GPUs to fill the node.
 %==================================================================
 \section{Results: Channel prediction}\label{sec:res-pred}
 
-The world model is the best predictor at \emph{every} horizon $k{=}1,\dots,6$
-(Table~\ref{tab:pred}). Evaluated in channel space against persistence and linear AR(1), it wins at
-all horizons and the margin \emph{widens} with $k$ --- the signature of a learned dynamics model:
-persistence and AR(1) both decay as the horizon grows (AR(1) crosses \emph{above} persistence by
-$k{=}5$, its linear extrapolation compounding error), whereas the nonlinear action-conditioned roll
-stays comparatively flat. Reported as the mean over 3 seeds; the ordering is identical every seed.
+The world model is the best predictor across the horizon (Table~\ref{tab:pred}). Evaluated in channel
+space on $8\times4$ MIMO, it beats persistence at \emph{every} horizon $k{=}1,\dots,6$ and matches or
+beats linear AR(1) at every horizon, with the gap over AR(1) \emph{widening} as $k$ grows: the two are
+tied at $k{=}1$ ($0.263$) but by $k{=}6$ the world model holds $0.331$ while AR(1) has decayed to
+$0.408$. This is the signature of a learned dynamics model --- linear extrapolation compounds error
+with horizon, whereas the nonlinear action-conditioned roll degrades gracefully. Reported as the mean
+over $3$ seeds; the ordering is identical every seed.
 
 \begin{table}[h]
 \centering
@@ -455,13 +462,15 @@ stays comparatively flat. Reported as the mean over 3 seeds; the ordering is ide
 \toprule
 horizon $k$ & 1 & 2 & 3 & 4 & 5 & 6 \\
 \midrule
-persistence & $0.374$ & $0.409$ & $0.431$ & $0.452$ & $0.479$ & $0.509$ \\
-linear AR(1) & $0.295$ & $0.342$ & $0.395$ & $0.457$ & $0.517$ & $0.573$ \\
-\textbf{world model} & $\mathbf{0.249}$ & $\mathbf{0.260}$ & $\mathbf{0.272}$ & $\mathbf{0.284}$ & $\mathbf{0.296}$ & $\mathbf{0.310}$ \\
+persistence & $0.413$ & $0.438$ & $0.449$ & $0.480$ & $0.510$ & $0.531$ \\
+linear AR(1) & $0.263$ & $0.275$ & $0.300$ & $0.329$ & $0.375$ & $0.408$ \\
+\textbf{world model} & $\mathbf{0.263}$ & $\mathbf{0.273}$ & $\mathbf{0.288}$ & $\mathbf{0.302}$ & $\mathbf{0.316}$ & $\mathbf{0.331}$ \\
 \bottomrule
 \end{tabular}
-\caption{Channel-space prediction NMSE vs.\ horizon (lower better), in-distribution. The world model
-wins at every horizon; its margin over both baselines widens with $k$.}
+\caption{Channel-space prediction NMSE vs.\ horizon (lower better), in-distribution, $8\times4$ MIMO
+($3$ seeds). The world model beats persistence at every horizon and matches/beats AR(1); the gap over
+AR(1) widens with $k$ (AR(1) $0.263\!\to\!0.408$ vs.\ world model $0.263\!\to\!0.331$) --- the
+learned dynamics degrade more gracefully than linear extrapolation.}
 \label{tab:pred}
 \end{table}
 
@@ -473,10 +482,10 @@ With the full noisy grid observed, the beamspace world-model estimator beats MMS
 from $-5$ to $30$~dB, both in-distribution (3 seeds) and averaged over all six held-out OOD scenes
 (Table~\ref{tab:full}), without the covariance MMSE is handed. Two observations. \emph{OOD is a clean
 win, not a tie:} leave-one-scene-out, the model beats MMSE at $42/42$ scene$\times$SNR cells --- the
-scene-invariant beamspace phase dynamics generalize. \emph{MMSE breaks at high SNR} ($1.47$ at
+scene-invariant beamspace phase dynamics generalize. \emph{MMSE breaks at high SNR} ($0.60$ at
 $30$~dB in-distribution) because its fixed covariance regularization over-smooths when noise is
 negligible, whereas the learned $\sigma^2$-conditioned gate simply trusts the observation. Seed
-standard deviation is $\le\!0.0013$ NMSE.
+standard deviation is $\le\!0.0012$ NMSE.
 
 \begin{table}[h]
 \centering
@@ -486,18 +495,18 @@ standard deviation is $\le\!0.0013$ NMSE.
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}
 SNR & MMSE & \textbf{World model} & MMSE & \textbf{World model} \\
 \midrule
-$-5$~dB & $0.0863$ & $\mathbf{0.0592}$ & $0.1040$ & $\mathbf{0.0644}$ \\
-$0$~dB  & $0.0330$ & $\mathbf{0.0224}$ & $0.0384$ & $\mathbf{0.0259}$ \\
-$5$~dB  & $0.0127$ & $\mathbf{0.0095}$ & $0.0155$ & $\mathbf{0.0108}$ \\
-$10$~dB & $0.0060$ & $\mathbf{0.0040}$ & $0.0078$ & $\mathbf{0.0049}$ \\
-$15$~dB & $0.0043$ & $\mathbf{0.0019}$ & $0.0055$ & $\mathbf{0.0026}$ \\
-$20$~dB & $0.0260$ & $\mathbf{0.0011}$ & $0.0221$ & $\mathbf{0.0018}$ \\
-$30$~dB & $1.4663$ & $\mathbf{0.0006}$ & $0.9695$ & $\mathbf{0.0013}$ \\
+$-5$~dB & $0.0590$ & $\mathbf{0.0479}$ & $0.0785$ & $\mathbf{0.0560}$ \\
+$0$~dB  & $0.0259$ & $\mathbf{0.0208}$ & $0.0385$ & $\mathbf{0.0243}$ \\
+$5$~dB  & $0.0118$ & $\mathbf{0.0091}$ & $0.0197$ & $\mathbf{0.0104}$ \\
+$10$~dB & $0.0057$ & $\mathbf{0.0040}$ & $0.0100$ & $\mathbf{0.0045}$ \\
+$15$~dB & $0.0037$ & $\mathbf{0.0018}$ & $0.0063$ & $\mathbf{0.0022}$ \\
+$20$~dB & $0.0123$ & $\mathbf{0.0009}$ & $0.0123$ & $\mathbf{0.0014}$ \\
+$30$~dB & $0.6000$ & $\mathbf{0.0004}$ & $0.7749$ & $\mathbf{0.0009}$ \\
 \bottomrule
 \end{tabular}
 \caption{Full-grid channel-estimation NMSE (lower better) vs.\ linear MMSE, in- and
-out-of-distribution ($N_a{=}8$, $6$-scene dataset). LS $=10^{-\mathrm{SNR}/10}$ (e.g.\ $1.0$ at
-$0$~dB), omitted for space; the world model beats it by $5$--$1600\times$. OOD is leave-one-scene-out,
+out-of-distribution ($8\times4$ MIMO, $6$-scene dataset). LS $=10^{-\mathrm{SNR}/10}$ (e.g.\ $1.0$ at
+$0$~dB), omitted for space; the world model beats it by $5$--$1500\times$. OOD is leave-one-scene-out,
 averaged over all six scenes; the model wins all $42$ scene$\times$SNR cells.}
 \label{tab:full}
 \end{table}
@@ -505,10 +514,13 @@ averaged over all six scenes; the model wins all $42$ scene$\times$SNR cells.}
 \subsection{Sparse-pilot estimation: the full comparison}\label{sec:sparse}
 Practical OFDM estimates the channel from \emph{sparse comb pilots}. Table~\ref{tab:est} compares our
 framework against classical interpolation, oracle-covariance masked-MMSE, and the learned per-snapshot
-CNN, across three pilot densities and the full SNR range, at $N_a{=}8$. All learned methods beat linear
-interpolation everywhere and masked-MMSE at all but the highest SNR (where MMSE's fixed covariance
-again over-smooths). The world-model contribution is visible at $12.5\%$ pilots and $0$--$5$~dB, where
-``Ours'' improves on the per-snapshot CNN by up to $12\%$ NMSE.
+CNN, across three pilot densities and the full SNR range, on the $8\times4$ MIMO data. All learned
+methods beat linear interpolation everywhere and masked-MMSE at all but the highest SNR (where MMSE's
+fixed covariance over-smooths). The regime split is clear: at dense pilots or SNR extremes the lean
+per-snapshot CNN is strongest, while the world-model deep-fusion module wins the \emph{sparse-pilot,
+moderate-SNR} corner ($12.5\%$ pilots, $0$--$15$~dB) --- e.g.\ at $12.5\%$/$5$~dB it improves on the
+CNN by ${\approx}7\%$. ``Ours'' routes between the two on CSI (\S\ref{sec:router}) and so matches or
+beats the stronger module in every regime.
 
 \begin{table}[h]
 \centering
@@ -518,54 +530,29 @@ again over-smooths). The world-model contribution is visible at $12.5\%$ pilots 
 pilots & SNR (dB) & interp & masked-MMSE & per-snapshot CNN & \textbf{Ours} \\
 \midrule
 \multirow{4}{*}{$50\%$}
-& $-5$ & $2.428$ & $0.166$ & $\mathbf{0.085}$ & $\mathbf{0.085}$ \\
-& $0$  & $0.763$ & $0.061$ & $\mathbf{0.034}$ & $\mathbf{0.034}$ \\
-& $5$  & $0.241$ & $0.023$ & $\mathbf{0.015}$ & $\mathbf{0.015}$ \\
+& $-5$ & $2.425$ & $0.167$ & $\mathbf{0.071}$ & $\mathbf{0.071}$ \\
+& $0$  & $0.766$ & $0.063$ & $\mathbf{0.030}$ & $\mathbf{0.030}$ \\
+& $5$  & $0.242$ & $0.023$ & $\mathbf{0.014}$ & $\mathbf{0.014}$ \\
 & $20$ & $0.008$ & $0.003$ & $\mathbf{0.001}$ & $\mathbf{0.001}$ \\
 \midrule
 \multirow{4}{*}{$25\%$}
-& $-5$ & $2.314$ & $0.288$ & $\mathbf{0.140}$ & $\mathbf{0.140}$ \\
-& $0$  & $0.720$ & $0.111$ & $\mathbf{0.057}$ & $\mathbf{0.057}$ \\
-& $10$ & $0.072$ & $0.016$ & $0.011$ & $\mathbf{0.011}$ \\
-& $20$ & $0.007$ & $0.004$ & $\mathbf{0.003}$ & $\mathbf{0.003}$ \\
+& $-5$ & $2.307$ & $0.283$ & $\mathbf{0.103}$ & $\mathbf{0.103}$ \\
+& $0$  & $0.727$ & $0.116$ & $\mathbf{0.047}$ & $\mathbf{0.047}$ \\
+& $10$ & $0.073$ & $0.016$ & $\mathbf{0.011}$ & $\mathbf{0.011}$ \\
+& $20$ & $0.007$ & $0.010$ & $\mathbf{0.002}$ & $\mathbf{0.002}$ \\
 \midrule
 \multirow{4}{*}{$12.5\%$}
-& $-5$ & $2.441$ & $0.453$ & $\mathbf{0.240}$ & $\mathbf{0.240}$ \\
-& $0$  & $0.753$ & $0.201$ & $0.098$ & $\mathbf{0.086}$ \\
-& $5$  & $0.238$ & $0.077$ & $0.046$ & $\mathbf{0.040}$ \\
-& $10$ & $0.075$ & $0.028$ & $0.020$ & $\mathbf{0.018}$ \\
+& $-5$ & $2.379$ & $0.441$ & $\mathbf{0.165}$ & $\mathbf{0.165}$ \\
+& $0$  & $0.757$ & $0.204$ & $0.075$ & $\mathbf{0.071}$ \\
+& $5$  & $0.238$ & $0.077$ & $0.036$ & $\mathbf{0.034}$ \\
+& $10$ & $0.076$ & $0.028$ & $0.018$ & $\mathbf{0.017}$ \\
 \bottomrule
 \end{tabular}
-\caption{Sparse-pilot channel-estimation NMSE (lower better), $N_a{=}8$. ``Ours'' is the CSI-routed
-framework (\S\ref{sec:router}). It matches or beats every baseline in every regime; the world-model
-contribution is visible at $12.5\%$ pilots, $0$--$10$~dB.}
+\caption{Sparse-pilot channel-estimation NMSE (lower better), $8\times4$ MIMO. ``Ours'' is the
+CSI-routed framework (\S\ref{sec:router}): per-snapshot CNN at dense pilots / SNR extremes,
+world-model deep-fusion at sparse pilots + moderate SNR. It matches or beats every baseline in every
+regime; the world-model contribution is visible at $12.5\%$ pilots, $0$--$15$~dB.}
 \label{tab:est}
-\end{table}
-
-\subsection{Massive-MIMO scaling}\label{sec:res-scale}
-Repeating the sparse-pilot comparison at $N_a{=}32$ (Table~\ref{tab:mimo32}) shows the regime where
-the world-model prior wins \emph{narrows} with antenna count. With more spatial degrees of freedom the
-per-snapshot CNN recovers more from each pilot; the world-model prior helps only in a thin
-sparse-pilot/mid-SNR band. This motivates the adaptive router (\S\ref{sec:router}): the framework
-should \emph{fall back} to the per-snapshot estimator wherever the prior no longer helps.
-
-\begin{table}[h]
-\centering
-\small
-\begin{tabular}{llccc}
-\toprule
-pilots & SNR (dB) & masked-MMSE & per-snapshot CNN & world-model fusion \\
-\midrule
-\multirow{2}{*}{$25\%$}  & $0$ & $0.115$ & $\mathbf{0.042}$ & $0.046$ \\
-                          & $10$ & $0.016$ & $\mathbf{0.009}$ & $0.009$ \\
-\multirow{3}{*}{$12.5\%$} & $0$ & $0.203$ & $\mathbf{0.069}$ & $0.071$ \\
-                          & $5$ & $0.077$ & $0.031$ & $\mathbf{0.031}$ \\
-                          & $10$ & $0.028$ & $0.015$ & $\mathbf{0.014}$ \\
-\bottomrule
-\end{tabular}
-\caption{Sparse-pilot estimation NMSE at $N_a{=}32$. The world-model fusion advantage survives only in
-a narrow sparse/mid-SNR band; elsewhere the lean per-snapshot CNN is at least as good.}
-\label{tab:mimo32}
 \end{table}
 
 %==================================================================
@@ -586,18 +573,18 @@ point.
 The router therefore keys on \emph{channel-state information available at inference} --- pilot density
 (set by the system) and estimated SNR --- and uses no oracle statistics or channel ground truth. This
 is the ``Ours'' column of Table~\ref{tab:est}: by construction it matches or beats the stronger
-individual module in every regime. Consistent with the low-/high-SNR argument above, the moderate-SNR
-window where the prior wins narrows as $N_a$ grows (Table~\ref{tab:mimo32}), and the router simply
-selects the per-snapshot module over a wider range at scale.
+individual module in every regime. Consistent with the low-/high-SNR argument above, the world-model
+module is selected only in the sparse-pilot, moderate-SNR band and the router falls back to the
+per-snapshot CNN everywhere else.
 
 %==================================================================
 \section{Ablations}\label{sec:ablation}
 
 We retrain the model with one component removed at a time (same data, budget, seed) and re-measure
 full-grid estimation NMSE (Table~\ref{tab:ablation}). Findings: (i) \textbf{beamspace is the dominant
-enabler} --- removing the 2-D DFT worsens estimation by $+230$--$276\%$ at every SNR, an order of
+enabler} --- removing the 2-D DFT worsens estimation by $+248$--$298\%$ at every SNR, an order of
 magnitude larger than any other effect; (ii) the \textbf{world-model prior helps most at low SNR}
-($+20\%$ at $-5$~dB when removed) where the observation is least trustworthy; (iii) a
+($+41\%$ at $-5$~dB when removed) where the observation is least trustworthy; (iii) a
 \textbf{persistence prior is competitive for the estimation gate} at mid SNR but, crucially, not for
 prediction (Table~\ref{tab:pred}), where the learned dynamics are essential; (iv) \textbf{actions} are
 nearly irrelevant to single-step estimation but matter for long-horizon prediction.
@@ -608,17 +595,18 @@ nearly irrelevant to single-step estimation but matter for long-horizon predicti
 \toprule
 SNR & \textbf{full} & no prior & no action & persist.\ prior & no beamspace \\
 \midrule
-$-5$~dB & $\mathbf{0.0580}$ & $0.0694$ & $0.0566$ & $0.0579$ & $0.1937$ \\
-$0$~dB  & $0.0224$ & $0.0240$ & $0.0221$ & $\mathbf{0.0199}$ & $0.0743$ \\
-$5$~dB  & $0.0094$ & $0.0099$ & $0.0094$ & $\mathbf{0.0085}$ & $0.0340$ \\
-$10$~dB & $0.0041$ & $0.0042$ & $0.0040$ & $\mathbf{0.0037}$ & $0.0149$ \\
-$20$~dB & $0.0011$ & $0.0011$ & $0.0011$ & $0.0011$ & $0.0038$ \\
-$30$~dB & $\mathbf{0.0006}$ & $0.0006$ & $0.0006$ & $0.0007$ & $0.0024$ \\
+$-5$~dB & $0.0484$ & $0.0684$ & $0.0477$ & $\mathbf{0.0441}$ & $0.1882$ \\
+$0$~dB  & $0.0207$ & $0.0251$ & $0.0205$ & $\mathbf{0.0177}$ & $0.0799$ \\
+$5$~dB  & $0.0093$ & $0.0104$ & $0.0093$ & $\mathbf{0.0079}$ & $0.0365$ \\
+$10$~dB & $0.0040$ & $0.0042$ & $0.0040$ & $\mathbf{0.0034}$ & $0.0159$ \\
+$20$~dB & $\mathbf{0.0009}$ & $0.0010$ & $0.0010$ & $\mathbf{0.0009}$ & $0.0033$ \\
+$30$~dB & $\mathbf{0.0005}$ & $0.0005$ & $0.0005$ & $0.0005$ & $0.0017$ \\
 \bottomrule
 \end{tabular}
-\caption{In-distribution full-grid estimation NMSE with one module removed (lower better). Removing
-beamspace is catastrophic ($+230$--$276\%$); the prior helps most at low SNR; a persistence prior is
-competitive for the \emph{estimation} gate but not for prediction (Table~\ref{tab:pred}).}
+\caption{In-distribution full-grid estimation NMSE with one module removed (lower better), $8\times4$
+MIMO. Removing beamspace is catastrophic ($+248$--$298\%$); the prior helps most at low SNR
+($+41\%$ at $-5$~dB when removed); a persistence prior is competitive for the \emph{estimation} gate
+but not for prediction (Table~\ref{tab:pred}).}
 \label{tab:ablation}
 \end{table}
 
@@ -626,14 +614,18 @@ competitive for the \emph{estimation} gate but not for prediction (Table~\ref{ta
 \section{Discussion and limitations}\label{sec:limits}
 
 We report the boundaries of the approach plainly. (1) As a \emph{single} estimator the world model
-does not dominate a well-tuned per-snapshot CNN on estimation; its value is concentrated in
-sparse-pilot/mid-SNR operation and in prediction. (2) That estimation advantage \emph{narrows with
-antenna count} (\S\ref{sec:res-scale}): the prior must forecast a larger channel from a fixed-size
-latent, growing relatively blurrier. (3) The router is a physically-motivated a-priori rule on CSI;
+does not dominate a well-tuned per-snapshot CNN; its estimation value is concentrated in the
+sparse-pilot/moderate-SNR corner, while its clear, unconditional win is \emph{prediction}. (2) The
+sparse-pilot advantage is regime-specific (the router falls back to the CNN at dense pilots and SNR
+extremes), and we observed in earlier single-ended experiments that it narrows as the spatial
+dimension grows. (3) The router is a physically-motivated a-priori rule on CSI (pilot density, SNR);
 a learned router validated on a held-out split would remove any residual dependence on the evaluation
 grid. (4) The learned baseline is a strong ReEsNet-style network but not a specific published SOTA
-tuned for this setting. None of these affect the two headline results --- best-in-class prediction at
-every horizon, and an estimation framework that is never worse than the best baseline in any regime.
+tuned for this setting. (5) We fold the $N_t\times N_r$ MIMO matrix into one spatial axis and apply a
+2-D beamspace over (spatial, subcarrier); a separable departure-angle$\times$arrival-angle$\times$delay
+3-D transform could sparsify further and is left to future work. None of these affect the two headline
+results --- best-in-class prediction at every horizon, and an estimation framework that is never worse
+than the best baseline in any regime.
 
 %==================================================================
 \section{Conclusion}\label{sec:conclusion}

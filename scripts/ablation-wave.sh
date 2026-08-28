@@ -19,7 +19,7 @@ mkdir -p results/ablation dashboard
 # run_one GPU TAG ABLATE [holdout]
 run_one() {
   local gpu=$1 tag=$2 ab=$3 holdout=${4:-}
-  local args="--data_dir $DATA --steps $STEPS --bs 96 --lr 3e-4 --tag $tag --ablate $ab --seed 0"
+  local args="--data_dir $DATA --steps $STEPS --bs 96 --lr 3e-4 --tag $tag --ablate $ab --seed 0 --n_ant ${NANT:-8} --n_sub ${NSUB:-32}"
   [ -n "$holdout" ] && args="$args --holdout_scene $holdout"
   CUDA_VISIBLE_DEVICES=$gpu torchrun --nproc_per_node=1 --master_port=$((29600 + gpu)) \
     scripts/train-beam-wm.py $args \
