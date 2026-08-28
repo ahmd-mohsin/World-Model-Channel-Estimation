@@ -10,16 +10,17 @@
 ACCOUNT="703671891219"
 CUSTOMER_ROLE="Intern"
 PROVIDER="isengard"                 # conduit is denied for this alias; isengard works
-PROFILE="greenland"
+PROFILE="greenland-exp3"   # NOT "greenland" — that profile drifts to the wrong account and every
+                           # StartSession returns a misleading TargetNotConnected. exp3 = acct 072510399842.
 REGION="us-east-2"
 JOB_ROLE_ARN="arn:aws:iam::072510399842:role/greenland-access-37f871283e3e69fdbfe97939a34079a8bfdfdd85"
 
 # ---- INSTANCE-SPECIFIC (edit when you switch jobs) -------------------
-# Job: cmohsinm-workspace (EKS: cmohsinm-workspace-278b2725)
+# Job: cmohsinm-workspace (EKS: cmohsinm-workspace-512fd084)
 # 1x p4d.24xlarge, 8x A100, us-east-2. Initiative: KiroScienceInterns.
-SSM_TARGET="mi-093ed15b2eb8b61b2"   # SsmManagedInstanceId from job JSON
-MAIN_NODE_IP="10.3.145.226"         # MainNodeIP / NodesEniHostIP
-LOCAL_PORT="1053"                   # local SSH tunnel port (per-instance to avoid clashes)
+SSM_TARGET="mi-00dfb842c100c9ae1"   # SsmManagedInstanceId from job JSON
+MAIN_NODE_IP="10.3.60.97"           # MainNodeIP / NodesEniHostIP
+LOCAL_PORT="1055"                   # local SSH tunnel port (per-instance to avoid clashes)
 # ----------------------------------------------------------------------
 
 # ---- SSH / tunnel (stable) ----
