@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source wireless/bin/activate
 
-DATA=data/mimo
+DATA="${1:-data/mimo}"
 JOINT=12000
 FT=4000
 OOD=simple_street_canyon

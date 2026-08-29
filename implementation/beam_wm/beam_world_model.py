@@ -81,7 +81,7 @@ class BeamWorldModel(nn.Module):
     ABLATIONS = ("full", "prior", "action", "ssm", "beamspace")
 
     def __init__(self, config: SSWMConfig, ablate: str = "full", sparse_stride: int = 0,
-                 deep_fusion: bool = False, fusion_blocks: int = 8):
+                 deep_fusion: bool = False, fusion_blocks: int = 8, persist_aug: bool = True):
         super().__init__()
         assert ablate in self.ABLATIONS, f"unknown ablation {ablate!r}"
         self.ablate = ablate
@@ -101,15 +101,21 @@ class BeamWorldModel(nn.Module):
         self.z_to_h = nn.Linear(d, config.state_dim)
         self.decoder = BeamDecoder(na, ns, d, base=config.unet_base_ch)
         self.pred_to_z = nn.Linear(config.state_dim, d)
-        # estimation fusion: learned Kalman gate on [obs_beam, prior_beam, noise]
-        self.gate = nn.Sequential(nn.Conv2d(5, config.unet_base_ch, 3, padding=1), nn.GELU(),
+        # persistence augmentation: feed the fusion heads the clean previous frame (t-1) as an EXTRA
+        # input alongside the learned prior. This makes the head's inputs a strict SUPERSET of both
+        # (a) the persistence baseline (it now HAS persistence -> can never lose to it) and (b) a
+        # pure-observation CNN (it sees obs + persistence + learned prior). +2 channels each head.
+        self.persist_aug = persist_aug
+        pa = 2 if persist_aug else 0
+        # estimation fusion: learned Kalman gate on [obs_beam, prior_beam, (persist), noise]
+        self.gate = nn.Sequential(nn.Conv2d(5 + pa, config.unet_base_ch, 3, padding=1), nn.GELU(),
                                   nn.Conv2d(config.unet_base_ch, 2, 3, padding=1), nn.Sigmoid())
-        self.refine = nn.Sequential(_ConvBlock(5, config.unet_base_ch), nn.Conv2d(config.unet_base_ch, 2, 1))
+        self.refine = nn.Sequential(_ConvBlock(5 + pa, config.unet_base_ch), nn.Conv2d(config.unet_base_ch, 2, 1))
         nn.init.zeros_(self.refine[-1].weight); nn.init.zeros_(self.refine[-1].bias)
-        # SPARSE-PILOT fusion (H-domain, mask-aware): [Y_masked(2), prior_H(2), mask(1), nv(1)] = 6ch
-        self.sparse_gate = nn.Sequential(nn.Conv2d(6, config.unet_base_ch, 3, padding=1), nn.GELU(),
+        # SPARSE-PILOT fusion: [Y_masked(2), prior_H(2), (persist_H(2)), mask(1), nv(1)]
+        self.sparse_gate = nn.Sequential(nn.Conv2d(6 + pa, config.unet_base_ch, 3, padding=1), nn.GELU(),
                                          nn.Conv2d(config.unet_base_ch, 2, 3, padding=1), nn.Sigmoid())
-        self.sparse_refine = nn.Sequential(_ConvBlock(6, config.unet_base_ch),
+        self.sparse_refine = nn.Sequential(_ConvBlock(6 + pa, config.unet_base_ch),
                                            nn.Conv2d(config.unet_base_ch, 2, 1))
         nn.init.zeros_(self.sparse_refine[-1].weight); nn.init.zeros_(self.sparse_refine[-1].bias)
         if deep_fusion:
@@ -119,7 +125,7 @@ class BeamWorldModel(nn.Module):
             # so if the prior has value the fused head should be >= ReEsNet everywhere.
             from ..task_heads.deep_baseline import _ResBlock
             fb = 64
-            self.fuse_in = nn.Conv2d(6, fb, 3, padding=1)
+            self.fuse_in = nn.Conv2d(6 + pa, fb, 3, padding=1)
             self.fuse_body = nn.Sequential(*[_ResBlock(fb) for _ in range(fusion_blocks)])
             self.fuse_mid = nn.Conv2d(fb, fb, 3, padding=1)
             self.fuse_out = nn.Conv2d(fb, 2, 3, padding=1)
@@ -127,7 +133,7 @@ class BeamWorldModel(nn.Module):
             # produces base = g*obs + (1-g)*prior (-> prior at low SNR, -> obs at high SNR), and the
             # residual body only CORRECTS it. fuse_out zero-init => training starts exactly at the
             # gated fusion, so the low-SNR fallback is deterministic (kills the seed variance).
-            self.fuse_gate = nn.Sequential(nn.Conv2d(6, fb, 3, padding=1), nn.GELU(),
+            self.fuse_gate = nn.Sequential(nn.Conv2d(6 + pa, fb, 3, padding=1), nn.GELU(),
                                            nn.Conv2d(fb, 2, 3, padding=1), nn.Sigmoid())
             nn.init.zeros_(self.fuse_out.weight); nn.init.zeros_(self.fuse_out.bias)
 
@@ -173,25 +179,30 @@ class BeamWorldModel(nn.Module):
 
     def _prior(self, z, h, a, anchor, obs_beam, beam):
         """World-model prior for the current step, honoring ablations.
-          full/action/beamspace : roll the predictor from p steps back on clean history
+          full/action/beamspace : a ONE-step prediction from the most recent clean frame (t-1),
+                                   so it is horizon-matched to the persistence baseline (also t-1) and
+                                   the only difference is the learned motion model. (Previously this
+                                   rolled 2 steps from t-2, handicapping it vs 1-step persistence.)
           prior                  : no prior (zeros) — gate sees only obs + noise
           ssm                    : previous clean frame echoed (persistence; no learned dynamics)
         """
         if self.ablate == "prior":
             return torch.zeros_like(obs_beam)
-        p = min(2, anchor)
+        if anchor < 1:
+            return torch.zeros_like(obs_beam)
         if self.ablate == "ssm":
-            return beam[:, anchor - 1] if anchor >= 1 else torch.zeros_like(obs_beam)
-        if p >= 1:
-            return self.predict_beam(z[:, anchor - p], h[:, anchor - p], a[:, anchor - p:anchor])
-        return torch.zeros_like(obs_beam)
+            return beam[:, anchor - 1]                      # 1-step persistence (motion-blind)
+        # 1-step learned prediction from t-1 (motion-aware), horizon-matched to persistence
+        return self.predict_beam(z[:, anchor - 1], h[:, anchor - 1], a[:, anchor - 1:anchor])
 
-    def estimate(self, obs_beam, prior_beam, noise_var):
+    def estimate(self, obs_beam, prior_beam, noise_var, persist=None):
         b, _, na, ns = obs_beam.shape
         nv = noise_var.reshape(b, 1, 1, 1).expand(b, 1, na, ns)
-        g = self.gate(torch.cat([obs_beam, prior_beam, nv], 1))       # (B,2,A,S) in [0,1]
-        base = g * obs_beam + (1 - g) * prior_beam                    # Kalman fusion
-        return base + self.refine(torch.cat([base, prior_beam, nv], 1))
+        extra = [persist] if (self.persist_aug and persist is not None) else \
+                ([torch.zeros_like(obs_beam)] if self.persist_aug else [])
+        g = self.gate(torch.cat([obs_beam, prior_beam, *extra, nv], 1))   # (B,2,A,S) in [0,1]
+        base = g * obs_beam + (1 - g) * prior_beam                        # Kalman fusion
+        return base + self.refine(torch.cat([base, prior_beam, *extra, nv], 1))
 
     @staticmethod
     def comb_mask(n_sub, stride, device):
@@ -200,7 +211,7 @@ class BeamWorldModel(nn.Module):
         m[::stride] = 1.0
         return m.reshape(1, 1, 1, n_sub)
 
-    def estimate_sparse(self, Y_masked, prior_H, mask, noise_var):
+    def estimate_sparse(self, Y_masked, prior_H, mask, noise_var, persist_H=None):
         """Sparse-pilot fusion in the ANTENNA-SUBCARRIER (H) domain.
 
         On observed subcarriers the gate may trust the (masked) observation; on UNOBSERVED
@@ -213,28 +224,41 @@ class BeamWorldModel(nn.Module):
         b, _, na, ns = Y_masked.shape
         nv = noise_var.reshape(b, 1, 1, 1).expand(b, 1, na, ns)
         mfull = mask.expand(b, 1, na, ns)
+        pe = [persist_H if persist_H is not None else torch.zeros_like(prior_H)] if self.persist_aug else []
         if self.deep_fusion:
-            # ReEsNet-capacity residual body over [Y_masked, prior_H, mask, nv], anchored on an
-            # SNR-adaptive gated fusion so the head only CORRECTS a sane base (stable at SNR extremes).
-            x = torch.cat([Y_masked, prior_H, mfull, nv], 1)                 # (B,6,A,S)
+            # ReEsNet-capacity residual body over [Y_masked, prior_H, (persist_H), mask, nv], anchored
+            # on an SNR-adaptive gated fusion so the head only CORRECTS a sane base.
+            x = torch.cat([Y_masked, prior_H, *pe, mfull, nv], 1)
             g = self.fuse_gate(x) * mask            # mask-aware: 0 on unobserved carriers -> prior
             base = g * Y_masked + (1 - g) * prior_H
             h = self.fuse_in(x)
             h = self.fuse_mid(self.fuse_body(h)) + h
             return base + self.fuse_out(h)          # zero-init out => starts exactly at base
-        g = self.sparse_gate(torch.cat([Y_masked, prior_H, mfull, nv], 1))   # (B,2,A,S)
+        g = self.sparse_gate(torch.cat([Y_masked, prior_H, *pe, mfull, nv], 1))
         g_eff = g * mask                                                     # 0 on unobserved carriers
         base = g_eff * Y_masked + (1 - g_eff) * prior_H
-        return base + self.sparse_refine(torch.cat([base, prior_H, mfull, nv], 1))
+        return base + self.sparse_refine(torch.cat([base, prior_H, *pe, mfull, nv], 1))
 
     def losses(self, o, a, snr_range=(0.0, 20.0), horizon_range=(1, 6), noise_gen=None,
-               chan_only=False):
+               chan_only=False, pred_only=False):
         cfg = self.config
         import random
         T = o.shape[1]
         beam = self._to(o)                      # (B,T,2,A,S) -> working domain (beamspace or raw)
         k = random.randint(horizon_range[0], min(horizon_range[1], T - 2))
         anchor = T - 1 - k
+
+        # pred_only: isolate the selective-SSM predictor at MATCHED objective vs learned temporal
+        # baselines (GRU/LSTM/Transformer). No estimation term, so the SSM is optimized purely for
+        # prediction -- removes the 5:1 estimation-weighted multitask confound.
+        if pred_only:
+            x, z, h = self.encode(beam, a)
+            b_pred = self.predict_beam(z[:, anchor], h[:, anchor], a[:, anchor:anchor + k])
+            loss_pred = F.mse_loss(b_pred, beam[:, anchor + k])
+            with torch.no_grad():
+                met = {"total": loss_pred.item(), "pred": loss_pred.item(), "chan": 0.0,
+                       "chan_nmse": 0.0}
+            return loss_pred, met
 
         # chan_only (estimation-only fine-tune): encoder/SSM/predictor are FROZEN -> run them under
         # no_grad so only the fusion head gets gradients; prediction stays exactly as trained.
@@ -258,14 +282,18 @@ class BeamWorldModel(nn.Module):
         Y = H_clean + torch.randn(H_clean.shape, generator=noise_gen, device=o.device) * nvar.sqrt()
         obs_beam = self._to(Y)
         prior_beam = self._prior(z, h, a, anchor, obs_beam, beam)
+        # persistence frame = clean previous channel (t-1), fed to the head so it can never lose to it
+        persist_beam = beam[:, anchor - 1] if anchor >= 1 else torch.zeros_like(obs_beam)
         if self.sparse_stride > 1:
             # SPARSE PILOTS: only 1-in-stride subcarriers observed; fuse in H-domain (mask-aware).
             mask = self.comb_mask(cfg.n_subcarriers, self.sparse_stride, o.device)
             Y_masked = Y * mask
             prior_H = self._from(prior_beam).detach()
-            H_hat = self.estimate_sparse(Y_masked, prior_H, mask, nvar.reshape(-1))
+            persist_H = self._from(persist_beam).detach()
+            H_hat = self.estimate_sparse(Y_masked, prior_H, mask, nvar.reshape(-1), persist_H=persist_H)
         else:
-            est_beam = self.estimate(obs_beam, prior_beam.detach(), nvar.reshape(-1))
+            est_beam = self.estimate(obs_beam, prior_beam.detach(), nvar.reshape(-1),
+                                     persist=persist_beam.detach())
             H_hat = self._from(est_beam)
         loss_chan = F.mse_loss(H_hat, H_clean)
 
@@ -287,7 +315,8 @@ class BeamWorldModel(nn.Module):
         Y = H_clean + torch.randn(H_clean.shape, generator=noise_gen, device=o_seq.device) * nvar.sqrt()
         obs_beam = self._to(Y)
         prior_beam = self._prior(z, h, a, t, obs_beam, beam)
-        est_beam = self.estimate(obs_beam, prior_beam, nvar.reshape(-1))
+        persist_beam = beam[:, t - 1] if t >= 1 else torch.zeros_like(obs_beam)
+        est_beam = self.estimate(obs_beam, prior_beam, nvar.reshape(-1), persist=persist_beam)
         return self._from(est_beam), H_clean
 
     @torch.no_grad()
@@ -304,7 +333,8 @@ class BeamWorldModel(nn.Module):
         Y_masked = Y * mask
         prior_beam = self._prior(z, h, a, t, self._to(Y), beam)
         prior_H = self._from(prior_beam)
-        H_hat = self.estimate_sparse(Y_masked, prior_H, mask, nvar.reshape(-1))
+        persist_H = self._from(beam[:, t - 1]) if t >= 1 else torch.zeros_like(prior_H)
+        H_hat = self.estimate_sparse(Y_masked, prior_H, mask, nvar.reshape(-1), persist_H=persist_H)
         return H_hat, H_clean, Y_masked, mask
 
     def freeze_for_finetune(self):

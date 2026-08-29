@@ -46,7 +46,9 @@ class SelectionNet(nn.Module):
             self.head_dt.bias.copy_(inv_softplus_dt)
 
         a_targets = torch.arange(1, cfg.state_dim + 1, dtype=torch.float32)
-        inv_softplus_a = torch.log(torch.expm1(a_targets))
+        # numerically stable inv_softplus (log(expm1(y)) overflows float32 for y>~88, e.g. state_dim>=89);
+        # y + log(-expm1(-y)) -> y for large y. Matches the stable form used for dt above.
+        inv_softplus_a = a_targets + torch.log(-torch.expm1(-a_targets))
         nn.init.normal_(self.head_A.weight, std=1e-3)
         with torch.no_grad():
             self.head_A.bias.copy_(inv_softplus_a)

@@ -29,6 +29,8 @@ def main():
     ap.add_argument("--ablate", default="full", choices=list(BeamWorldModel.ABLATIONS))
     ap.add_argument("--n_ant", type=int, default=8)
     ap.add_argument("--n_sub", type=int, default=32)
+    ap.add_argument("--pred_only", action="store_true",
+                    help="train the selective-SSM predictor with NO estimation term (fair vs learned temporal baselines)")
     args = ap.parse_args()
     torch.manual_seed(args.seed)
 
@@ -55,7 +57,7 @@ def main():
     hist = []
     for step in range(args.steps):
         o, a = ds.batch(args.bs, "train", rng=rng, device=dev)
-        total, met = ddp(o, a, noise_gen=ng)
+        total, met = ddp(o, a, noise_gen=ng, pred_only=args.pred_only)
         opt.zero_grad(); total.backward()
         torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0)
         opt.step(); sched.step()
