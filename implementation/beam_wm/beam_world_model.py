@@ -23,12 +23,12 @@ try:
     from ..config import SSWMConfig
     from ..selection_net import SelectionNet
     from ..selective_ssm import discretize
-    from ..wireless_data.beamspace import to_beamspace, from_beamspace
+    from ..wireless_data.beamspace import to_beamspace, from_beamspace, to_beamspace_mimo, from_beamspace_mimo
 except ImportError:
     from config import SSWMConfig
     from selection_net import SelectionNet
     from selective_ssm import discretize
-    from wireless_data.beamspace import to_beamspace, from_beamspace
+    from wireless_data.beamspace import to_beamspace, from_beamspace, to_beamspace_mimo, from_beamspace_mimo
 
 
 class _ConvBlock(nn.Module):
@@ -56,17 +56,33 @@ class BeamEncoder(nn.Module):
 
 
 class BeamDecoder(nn.Module):
-    """latent (B,d) -> beamspace channel grid (B,2,A,S). Reconstructs sparse taps."""
+    """latent (B,d) -> beamspace channel grid (B,2,A,S). Reconstructs sparse taps.
 
-    def __init__(self, n_ant, n_sub, d, base=48):
+    agnostic=True: SPATIAL-SIZE-AGNOSTIC decoder. Instead of an fc that hard-codes (n_ant,n_sub), the
+    latent is broadcast over the grid and combined with normalized (row,col) coordinate channels, then
+    convolved --- so the SAME weights decode any (A,S). Enables cross-config transfer (train 8x4, run
+    16x8). grid_shape() may be overridden at inference to a different (A,S)."""
+
+    def __init__(self, n_ant, n_sub, d, base=48, agnostic=False):
         super().__init__()
-        self.n_ant, self.n_sub = n_ant, n_sub
-        self.fc = nn.Linear(d, base * n_ant * n_sub)
-        self.base = base
-        self.net = nn.Sequential(_ConvBlock(base, base), nn.Conv2d(base, 2, 1))
+        self.n_ant, self.n_sub, self.base, self.agnostic = n_ant, n_sub, base, agnostic
+        if agnostic:
+            self.proj = nn.Linear(d, base)
+            self.net = nn.Sequential(_ConvBlock(base + 2, base), _ConvBlock(base, base),
+                                     nn.Conv2d(base, 2, 1))
+        else:
+            self.fc = nn.Linear(d, base * n_ant * n_sub)
+            self.net = nn.Sequential(_ConvBlock(base, base), nn.Conv2d(base, 2, 1))
 
-    def forward(self, z):
+    def forward(self, z, grid=None):
         b = z.shape[0]
+        if self.agnostic:
+            A, S = grid or (self.n_ant, self.n_sub)
+            h = self.proj(z)[:, :, None, None].expand(b, self.base, A, S)
+            ii = torch.linspace(-1, 1, A, device=z.device)[None, None, :, None].expand(b, 1, A, S)
+            jj = torch.linspace(-1, 1, S, device=z.device)[None, None, None, :].expand(b, 1, A, S)
+            h = torch.cat([h, ii, jj], 1)
+            return self.net(h)
         h = self.fc(z).reshape(b, self.base, self.n_ant, self.n_sub)
         return self.net(h)
 
@@ -81,12 +97,18 @@ class BeamWorldModel(nn.Module):
     ABLATIONS = ("full", "prior", "action", "ssm", "beamspace")
 
     def __init__(self, config: SSWMConfig, ablate: str = "full", sparse_stride: int = 0,
-                 deep_fusion: bool = False, fusion_blocks: int = 8, persist_aug: bool = True):
+                 deep_fusion: bool = False, fusion_blocks: int = 8, persist_aug: bool = True,
+                 beam3d: bool = False, n_tx: int = 0, n_rx: int = 1, agnostic_decoder: bool = False):
         super().__init__()
         assert ablate in self.ABLATIONS, f"unknown ablation {ablate!r}"
         self.ablate = ablate
+        self.agnostic_decoder = agnostic_decoder
         self.sparse_stride = sparse_stride      # 0 = dense pilots; s>1 = 1-in-s comb pilots
         self.deep_fusion = deep_fusion          # ReEsNet-capacity sparse head fed the WM prior
+        # beam3d: use the separable angle-angle-delay 3-D transform instead of the folded 2-D DFT
+        self.beam3d = beam3d
+        self.n_tx = n_tx or config.n_antennas
+        self.n_rx = n_rx
         self.config = config
         d, na, ns = config.latent_dim, config.n_antennas, config.n_subcarriers
         self.encoder = BeamEncoder(na, ns, d, base=config.unet_base_ch)
@@ -99,7 +121,7 @@ class BeamWorldModel(nn.Module):
         # predictor: rolls latent with planned actions, decodes to a FUTURE beam channel
         self.pred_in = nn.Linear(config.action_dim, config.state_dim)
         self.z_to_h = nn.Linear(d, config.state_dim)
-        self.decoder = BeamDecoder(na, ns, d, base=config.unet_base_ch)
+        self.decoder = BeamDecoder(na, ns, d, base=config.unet_base_ch, agnostic=agnostic_decoder)
         self.pred_to_z = nn.Linear(config.state_dim, d)
         # persistence augmentation: feed the fusion heads the clean previous frame (t-1) as an EXTRA
         # input alongside the learned prior. This makes the head's inputs a strict SUPERSET of both
@@ -139,10 +161,18 @@ class BeamWorldModel(nn.Module):
 
     # ---- domain transform (identity under the "beamspace" ablation) ----
     def _to(self, x):
-        return x if self.ablate == "beamspace" else to_beamspace(x)
+        if self.ablate == "beamspace":
+            return x
+        if self.beam3d:
+            return to_beamspace_mimo(x, self.n_tx, self.n_rx)
+        return to_beamspace(x)
 
     def _from(self, x):
-        return x if self.ablate == "beamspace" else from_beamspace(x)
+        if self.ablate == "beamspace":
+            return x
+        if self.beam3d:
+            return from_beamspace_mimo(x, self.n_tx, self.n_rx)
+        return from_beamspace(x)
 
     def _act(self, a):
         """Zero actions under the 'action' ablation so motion cannot inform dynamics."""

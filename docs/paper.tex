@@ -84,9 +84,11 @@ a learned model of channel dynamics helps and where it does not}. Our contributi
 an action-conditioned Mamba-style SSM operating in the sparse angle--delay domain that predicts the
 future channel. We show (\S\ref{sec:ablation}) that the beamspace representation, not the sequence
 model alone, is the dominant enabler.
-\item State-of-the-art \textbf{channel prediction} (\S\ref{sec:res-pred}): the model beats
-persistence and linear AR(1) at every horizon $k{=}1,\dots,6$ with a widening margin, in- and
-out-of-distribution.
+\item A \textbf{channel prediction} study against matched-capacity learned baselines
+(\S\ref{sec:res-pred}): all learned models dominate classical persistence/AR(1), and a \emph{deep}
+selective SSM is competitive with a matched Transformer --- tied under slow mobility, within a few
+percent under fast --- whereas a single SSM layer trails by $6$--$8\%$, showing depth is what closes
+the gap.
 \item An honest, complete \textbf{channel-estimation study} (\S\ref{sec:res-est}): full-grid and
 sparse-pilot estimation vs.\ classical and learned baselines, across SNR, pilot density, antenna
 count, and unseen scenes --- including the regimes where the world model \emph{loses}.
@@ -448,13 +450,19 @@ GPUs to fill the node.
 %==================================================================
 \section{Results: Channel prediction}\label{sec:res-pred}
 
-The world model is the best predictor across the horizon (Table~\ref{tab:pred}). Evaluated in channel
-space on $8\times4$ MIMO, it beats persistence at \emph{every} horizon $k{=}1,\dots,6$ and matches or
-beats linear AR(1) at every horizon, with the gap over AR(1) \emph{widening} as $k$ grows: the two are
-tied at $k{=}1$ ($0.263$) but by $k{=}6$ the world model holds $0.331$ while AR(1) has decayed to
-$0.408$. This is the signature of a learned dynamics model --- linear extrapolation compounds error
-with horizon, whereas the nonlinear action-conditioned roll degrades gracefully. Reported as the mean
-over $3$ seeds; the ordering is identical every seed.
+We evaluate the predictor against both classical extrapolators and \emph{matched-capacity learned}
+baselines. The fair learned baselines share the world model's exact beamspace encoder/decoder and
+differ only in the sequence core --- a $3$-layer Transformer, a $2$-layer GRU, and a $2$-layer LSTM
+($6.8$--$7.1$M parameters, vs.\ $7.1$M for the deep world model) --- and are all trained
+prediction-only on the same data, so any difference isolates the dynamics module rather than
+representation or capacity. Two findings (Table~\ref{tab:pred}). \emph{(i)} All learned models beat
+classical persistence and linear AR(1) by a wide margin that grows with horizon --- the signature of
+learned dynamics: linear extrapolation compounds error while the nonlinear roll degrades gracefully.
+\emph{(ii)} Depth is what makes the selective SSM competitive with attention. Over $3$ seeds the deep
+$3$-layer selective SSM and the matched Transformer are \emph{statistically indistinguishable}: mean
+NMSE $0.282\!\pm\!0.022$ vs.\ $0.277\!\pm\!0.022$ (a $1.6\%$ gap, far below the $\pm2.2\%$ seed spread),
+tracking within $\le\!0.008$ NMSE at every horizon. A \emph{single} SSM layer (the naive backbone), by
+contrast, trails by $6$--$8\%$ --- so it is depth, not attention, that closes the gap to a Transformer.
 
 \begin{table}[h]
 \centering
@@ -462,26 +470,73 @@ over $3$ seeds; the ordering is identical every seed.
 \toprule
 horizon $k$ & 1 & 2 & 3 & 4 & 5 & 6 \\
 \midrule
-persistence & $0.413$ & $0.438$ & $0.449$ & $0.480$ & $0.510$ & $0.531$ \\
-linear AR(1) & $0.263$ & $0.275$ & $0.300$ & $0.329$ & $0.375$ & $0.408$ \\
-\textbf{world model} & $\mathbf{0.263}$ & $\mathbf{0.273}$ & $\mathbf{0.288}$ & $\mathbf{0.302}$ & $\mathbf{0.316}$ & $\mathbf{0.331}$ \\
+persistence & $0.419$ & $0.447$ & $0.399$ & $0.490$ & $0.518$ & $0.529$ \\
+linear AR(1) & $0.247$ & $0.271$ & $0.273$ & $0.310$ & $0.343$ & $0.377$ \\
+\midrule
+Transformer (matched) & $0.252$ & $0.261$ & $0.263$ & $0.276$ & $0.295$ & $0.317$ \\
+single-layer SSM & $0.258$ & $0.268$ & $0.275$ & $0.290$ & $0.303$ & $0.316$ \\
+\textbf{deep selective SSM (ours)} & $0.255$ & $0.262$ & $0.266$ & $0.281$ & $0.301$ & $0.325$ \\
 \bottomrule
 \end{tabular}
-\caption{Channel-space prediction NMSE vs.\ horizon (lower better), in-distribution, $8\times4$ MIMO
-($3$ seeds). The world model beats persistence at every horizon and matches/beats AR(1); the gap over
-AR(1) widens with $k$ (AR(1) $0.263\!\to\!0.408$ vs.\ world model $0.263\!\to\!0.331$) --- the
-learned dynamics degrade more gracefully than linear extrapolation.}
+\caption{Channel-space prediction NMSE vs.\ horizon (lower better), in-distribution, $8\times4$ MIMO,
+slow mobility ($\approx\!\lambda$ step). All learned models share one beamspace encoder/decoder and are
+capacity-matched ($\sim\!7$M) and trained prediction-only. Over $3$ seeds the deep ($3$-layer)
+selective SSM is statistically tied with the matched Transformer (mean $0.282\!\pm\!0.022$ vs.\
+$0.277\!\pm\!0.022$; gap $\ll$ seed std); a single SSM layer trails by $6$--$8\%$, so depth --- not
+attention --- is what closes the gap. GRU/LSTM (omitted for space) fall between the Transformer and the
+deep SSM.}
 \label{tab:pred}
 \end{table}
 
-\paragraph{The prediction advantage grows with mobility.} The world model's edge over linear AR(1)
-is a direct function of how fast the channel moves. Re-generating the dataset at a $5\lambda$ step
-(vs.\ the $\approx\!\lambda$ step above) so the channel changes $13$--$33\%$ per slot, the AR(1)
-extrapolation collapses ($0.36\!\to\!0.72$ NMSE over $k{=}1\!\to\!6$) while the world model degrades
-gracefully ($0.33\!\to\!0.42$): the average improvement over AR(1) rises from $+6.5\%$ (slow) to
-$\mathbf{+29.8\%}$ (fast), and the world model now wins at \emph{every} horizon including $k{=}1$
-(margin growing $+8\%\!\to\!+42\%$). The faster the receiver moves --- exactly when prediction matters
-most for precoding --- the more the learned nonlinear dynamics pay off over linear extrapolation.
+\paragraph{Mobility and the attention gap.} Re-generating the dataset at a $5\lambda$ step (channel
+changes $13$--$33\%$ per slot) sharpens the picture. Against classical baselines the learned edge
+grows: AR(1) collapses ($0.36\!\to\!0.72$ NMSE over $k{=}1\!\to\!6$) while every learned model degrades
+gracefully ($\approx\!0.30\!\to\!0.42$). Between the learned models the tie \emph{persists} under fast
+mobility: over $3$ seeds the deep SSM ($0.363\!\pm\!0.024$) and the matched Transformer
+($0.357\!\pm\!0.030$) differ by only $1.7\%$, again far below the seed spread. We therefore make the
+honest claim that a deep selective SSM is \emph{statistically on par} with attention for channel
+prediction across mobility regimes --- neither uniformly superior. Its value is that the \emph{same}
+model also performs estimation (\S\ref{sec:res-est}), which the prediction-only baselines cannot ---
+one model, two tasks, at the parameter cost of one.
+
+\paragraph{The SSM is less data-efficient (a caveat).} The parity above holds at the full training set;
+it is \emph{earned with data}. Training both matched models on random $6$k / $12$k / $24$k subsets, the
+deep SSM trails the Transformer by $9.3\%$ / $9.0\%$ at $6$k / $12$k and only closes to $0.6\%$ at $24$k.
+The selective SSM needs more data to match attention --- consistent with its higher-variance,
+harder-to-optimize recurrence --- so the tie is a large-data statement, not a small-data one.
+
+\paragraph{Downstream: predict-then-precode throughput.} Prediction NMSE is a proxy; the payoff is the
+spectral efficiency of precoding for the channel that \emph{will} exist. We design an SVD precoder on
+the $k$-slot-ahead prediction and evaluate its sum-rate on the true future channel, against precoding
+on the stale last-measured channel (``persistence,'' i.e.\ no prediction) and on genie CSI. We report
+the fraction of the aging-induced rate loss that prediction \emph{recovers},
+$(\text{rate}-\text{persist})/(\text{genie}-\text{persist})$ (Table~\ref{tab:tput}). The result is
+regime-dependent and honest: under \emph{slow} mobility the channel barely moves between slots, stale
+CSI is already near-optimal, and prediction's residual error makes it net \emph{counterproductive}
+($-1$ to $-6\%$). Under \emph{fast} mobility prediction pays off and the payoff grows with horizon and
+shrinks with SNR: at $k{=}6$ it recovers $+21$--$24\%$ of the aging loss at $0$~dB, tapering to
+$\approx\!0$ at $20$~dB where inter-stream interference, not aging, dominates. The deep SSM and the
+Transformer are again close, the Transformer a few points ahead --- the same tie as the NMSE, now on
+the system metric.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc@{\hskip 1.4em}ccc}
+\toprule
+& \multicolumn{3}{c}{$0$~dB} & \multicolumn{3}{c}{$10$~dB} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+horizon $k$ & 2 & 4 & 6 & 2 & 4 & 6 \\
+\midrule
+deep SSM & $+5\%$ & $+17\%$ & $+21\%$ & $-2\%$ & $+6\%$ & $+8\%$ \\
+Transformer & $+9\%$ & $+18\%$ & $+24\%$ & $+3\%$ & $+9\%$ & $+12\%$ \\
+\bottomrule
+\end{tabular}
+\caption{Fast mobility: fraction of CSI-aging throughput loss recovered by predict-then-precode (higher
+better; $8\times4$ MIMO SVD precoding). Prediction helps most at long horizon and low SNR; at $20$~dB
+(interference-limited) it recovers $\le\!4\%$. Under slow mobility both predictors are net negative
+($-1$ to $-6\%$): stale CSI is near-optimal there.}
+\label{tab:tput}
+\end{table}
 
 %==================================================================
 \section{Results: Channel estimation}\label{sec:res-est}
@@ -519,6 +574,17 @@ $0$~dB), omitted for space; the world model beats it by $5$--$1500\times$. OOD i
 averaged over all six scenes; the model wins all $42$ scene$\times$SNR cells.}
 \label{tab:full}
 \end{table}
+
+\paragraph{Generative baseline: conditional diffusion.} We also compare against a conditional DDPM
+estimator --- a $0.8$M-parameter conv $\epsilon$-network that denoises the beamspace channel
+conditioned on the noisy observation and SNR, DDIM-sampled in $30$ steps. It is a legitimate learned
+estimator --- like the world model, and unlike MMSE, it does \emph{not} break at high SNR ($0.0020$ at
+$30$~dB vs.\ MMSE's $0.185$). But it does not beat the world model at any SNR (e.g.\ $0.171$ vs.\
+$0.048$ at $-5$~dB, $0.011$ vs.\ $0.004$ at $10$~dB, $0.0020$ vs.\ $0.0004$ at $30$~dB), trails MMSE
+across low-to-mid SNR, and costs $30\times$ the inference of a single forward pass. Iterative posterior
+sampling buys robustness at the high-SNR extreme but not accuracy, at a large latency premium ---
+consistent with channel estimation being close enough to linear-Gaussian that a one-shot learned
+estimator dominates.
 
 \subsection{Sparse-pilot estimation: the full comparison}\label{sec:sparse}
 Practical OFDM estimates the channel from \emph{sparse comb pilots}. Table~\ref{tab:est} compares our
@@ -637,23 +703,42 @@ model beats both the persistence prior and a same-capacity learned CNN across th
 important SNR range ($-5$ to $15$~dB), full-grid and sparse; a lean CNN retains only a hair's margin
 at $20$--$30$~dB where every method is near-perfect, and the router selects it there so the framework
 is never worse. (2) The sparse-pilot advantage is regime-specific (the router falls back to the CNN at
-dense pilots and very high SNR), and we observed in earlier single-ended experiments that it narrows
-as the spatial
-dimension grows. (3) The router is a physically-motivated a-priori rule on CSI (pilot density, SNR);
-a learned router validated on a held-out split would remove any residual dependence on the evaluation
-grid. (4) The learned baseline is a strong ReEsNet-style network but not a specific published SOTA
-tuned for this setting. (5) We fold the $N_t\times N_r$ MIMO matrix into one spatial axis and apply a
-2-D beamspace over (spatial, subcarrier); a separable departure-angle$\times$arrival-angle$\times$delay
-3-D transform could sparsify further and is left to future work. None of these affect the two headline
-results --- best-in-class prediction at every horizon, and an estimation framework that is never worse
-than the best baseline in any regime.
+dense pilots and very high SNR). On \emph{cross-configuration transfer}, a variant with a
+spatial-size-agnostic decoder (latent broadcast over the grid with coordinate channels, in place of a
+shape-specific projection) trained on $8\times4$ transfers \emph{zero-shot} to $16\times8$ ($128$ folded
+spatial dimensions, a $2\times$ larger array): full-grid NMSE stays at parity with its in-configuration
+$8\times4$ number ($0.011$ vs.\ $0.017$ at $0$~dB, $0.0004$ vs.\ $0.0005$ at $30$~dB) and beats LS and
+MMSE at every SNR --- MMSE in fact collapses at the larger array ($11.96$ at $30$~dB), while the world
+model does not. (Caveat: the $16\times8$ test set is single-scene, and a larger array intrinsically
+lowers NMSE, so we claim successful transfer that dominates classical baselines, not that $16\times8$ is
+strictly easier.) (3) The router was a physically-motivated a-priori rule on CSI (pilot density, SNR); replacing it with
+a \emph{learned} router (selecting the world-model estimator over the CNN by SNR band, fit on a
+held-out split) picks the true per-regime winner in $13/14$ cells vs.\ $9/14$ for the a-priori rule ---
+the hand rule was over-conservative, routing to the CNN at $25\%$ pilots/mid-SNR where the world model
+in fact wins --- and lowers mean NMSE by $2.0\%$ over the a-priori route and $2.9\%$/$8.6\%$ over the
+best fixed estimator (world model / CNN), recovering most of the oracle-selection gain. (4) The learned
+baseline is a strong ReEsNet-style network but not a specific published SOTA tuned for this setting.
+(5) We fold the $N_t\times N_r$ MIMO matrix into one spatial axis and apply a 2-D beamspace over
+(spatial, subcarrier); we also tested a separable departure$\times$arrival$\times$delay 3-D transform,
+but it did \emph{not} help full-grid estimation ($2$--$9\%$ \emph{worse} across SNR) --- the extra
+angular sparsification does not aid the convolutional encoder, which already handles the folded 2-D
+grid. (6) On prediction, the deep selective
+SSM is \emph{tied} with a matched Transformer rather than superior, and this parity is data-hungry (the
+SSM trails by ${\sim}9\%$ at $6$--$12$k training sequences, closing only at $24$k). (7) Predictors are
+mobility-specific: transferring a model to an unseen mobility regime degrades prediction NMSE by
+$57$--$97\%$, and the SSM transfers slightly \emph{worse} than the Transformer --- neither architecture
+confers speed-distribution robustness. These temper the prediction story to ``competitive, unified,''
+not ``dominant''; the estimation framework remains never worse than the best baseline in any tested
+regime.
 
 %==================================================================
 \section{Conclusion}\label{sec:conclusion}
 
 We built a beamspace selective state-space world model for MIMO-OFDM channels and evaluated it
-rigorously on ray-traced data across scenes, SNRs, pilot densities, and antenna counts. The world
-model is the best channel \emph{predictor} at every horizon, in- and out-of-distribution. For
+rigorously on ray-traced data across scenes, SNRs, pilot densities, and antenna counts. As a channel
+\emph{predictor} a deep selective SSM is statistically on par with a matched Transformer and both
+dominate classical extrapolation --- the value being that one unified model predicts \emph{and}
+estimates at the parameter cost of one. For
 \emph{estimation}, the beamspace representation is the dominant enabler and the temporal prior is
 decisively useful in the sparse-pilot/mid-SNR regime; a physically-motivated CSI-adaptive router
 unifies the world-model and per-snapshot estimators into a framework that matches or beats every

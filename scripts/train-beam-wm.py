@@ -31,6 +31,9 @@ def main():
     ap.add_argument("--n_sub", type=int, default=32)
     ap.add_argument("--pred_only", action="store_true",
                     help="train the selective-SSM predictor with NO estimation term (fair vs learned temporal baselines)")
+    ap.add_argument("--beam3d", action="store_true", help="separable 3-D angle-angle-delay transform")
+    ap.add_argument("--n_tx", type=int, default=8); ap.add_argument("--n_rx", type=int, default=4)
+    ap.add_argument("--agnostic_decoder", action="store_true", help="spatial-size-agnostic decoder (cross-config)")
     args = ap.parse_args()
     torch.manual_seed(args.seed)
 
@@ -45,7 +48,8 @@ def main():
     if main_rank:
         print(f"world={dist.get_world_size()} | train {len(ds.train_idx)} test {len(ds.test_idx)} "
               f"| holdout={args.holdout_scene} | scenes {ds.scenes}", flush=True)
-    m = BeamWorldModel(cfg, ablate=args.ablate).to(dev)
+    m = BeamWorldModel(cfg, ablate=args.ablate, beam3d=args.beam3d, n_tx=args.n_tx, n_rx=args.n_rx,
+                       agnostic_decoder=args.agnostic_decoder).to(dev)
     if main_rank:
         print(f"params: {sum(p.numel() for p in m.parameters()):,} | ablate={args.ablate}", flush=True)
     ddp = DDP(m, device_ids=[local], find_unused_parameters=True)

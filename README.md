@@ -1,478 +1,180 @@
-# SSWM — A Selective State-Space World Model for Wireless Channel Estimation
+# Beam-WM — A Beamspace Selective State-Space World Model for MIMO-OFDM Channels
 
-A self-supervised **world model** that learns to predict how a wireless channel *evolves*,
-built on a frozen pretrained wireless foundation model and a Mamba-style selective state-space
-backbone. This repository implements the architecture from `docs/sswm_fig.pdf` module by module,
-with every component independently tested and validated on real ray-traced channels on A100 GPUs.
+A **world model** for wireless channels that learns the channel's *dynamics* in a sparse
+angle–delay (beamspace) representation and uses them for two tasks with **one** model:
+**channel estimation** (recover `H` from noisy, possibly sparse pilots) and **channel prediction**
+(forecast `H` several slots ahead for CSI-aging-robust precoding). The temporal backbone is a
+Mamba-style **selective state-space model (SSM)** conditioned on receiver motion; the representation
+is an orthonormal 2-D DFT (beamspace). Everything is validated on **ray-traced Sionna RT channels**,
+true **MIMO 8×4**, across six scenes and two mobility regimes, on 8× A100 GPUs.
 
-![SSWM live training dashboard](docs/assets/dashboard.png)
-
-*Live training dashboard: real Sionna 3D ray-tracing scene (TX + RX trajectory), per-module loss
-curves, and channel-estimation vs LS/MMSE — all updating in real time during the 8× A100 run.*
-
----
-
-## 1. Motivation
-
-**Channel estimation is the bottleneck of modern wireless systems.** A MIMO-OFDM receiver must
-continuously estimate the channel matrix `H` (how each transmit antenna couples to each receive
-antenna across each subcarrier) to decode data, steer beams, and schedule users. Classical
-estimators (LS, MMSE) treat each snapshot independently and need dense pilot symbols, which cost
-spectrum and energy. They also ignore a powerful fact: **the channel is not random across time —
-it evolves smoothly and predictably** as users move and the environment changes.
-
-That structure is exactly what a **world model** captures. Instead of re-estimating from scratch,
-we want a model that, given the recent channel history and the planned actions (pilot pattern,
-beam index, scheduling), **predicts the future channel** in a compact latent space. If we can do
-that, we can:
-
-- **Reduce pilot overhead** — predict the channel between pilots instead of measuring it.
-- **Enable proactive decisions** — beam selection / scheduling that anticipate where the channel
-  is going, not where it was.
-- **Learn reusable representations** — one self-supervised backbone that many downstream tasks
-  (estimation, prediction, beam selection, reward) can probe.
-
-**Why a JEPA-style world model (and not pixel/channel reconstruction)?** Predicting raw channel
-coefficients wastes capacity on noise and fine detail that don't matter for decisions. The
-**Joint-Embedding Predictive Architecture (JEPA)** instead predicts in *representation space*:
-encode the channel into a latent, and predict the *latent* of the future channel. This focuses
-the model on the predictable, decision-relevant structure and avoids the instabilities of
-generative reconstruction.
-
-**Why a selective state-space model (SSM)?** The temporal backbone must roll a latent state
-forward conditioned on actions, over potentially long sequences, cheaply. Mamba-style **selective
-SSMs** are linear-time, have a natural continuous-time interpretation (well-suited to physical
-channel dynamics), and make the dynamics *input-dependent* — the transition is conditioned on the
-action, which is exactly what a controllable world model needs.
-
-**Why a pretrained wireless backbone?** Channels are not natural images. We use **LWM (Large
-Wireless Model)**, a transformer pretrained on DeepMIMO channels, as a frozen encoder — so we
-inherit a domain-native representation instead of learning one from scratch.
+> **Design note (important):** earlier iterations used a JEPA latent-predictive objective and a frozen
+> LWM foundation encoder. Both were **dropped**. A frozen LWM collapsed on real Sionna channels, and a
+> latent-invariance objective is the wrong target for a model that must reconstruct a *faithful* future
+> channel. The current model predicts the **actual future channel in beamspace** (reconstruction), and
+> that prediction doubles as a temporal **prior** for estimation. This README describes what the code
+> actually does today.
 
 ---
 
-## 2. Architecture
+## 1. What this is, in one paragraph
 
-![SSWM architecture](docs/assets/architecture.png)
+A MIMO-OFDM receiver must estimate the channel `H` (Nt×Nr antennas × subcarriers) and, under mobility,
+predict where it is going so the transmitter can precode for the channel that *will* exist. Classical
+estimators (LS, MMSE) treat each snapshot independently and ignore temporal structure. We instead
+transform the channel into the sparse **beamspace** (a 2-D DFT over spatial × subcarrier), encode each
+frame, roll a **selective SSM** forward under the motion action to predict the future beamspace channel,
+and **fuse** that prediction with the noisy observation through a learned Kalman-style gate to estimate
+the current channel. One representation, one backbone, both tasks.
 
-The figure (from `docs/sswm_fig.pdf`) shows the full self-supervised world model. The data flow
-for one training step:
+## 2. Headline findings (honest)
+
+We benchmark against classical **and** matched-capacity **learned** baselines, and report negatives.
+
+**Estimation — the strong pillar.**
+- **Full-grid:** beats MMSE at every SNR (−5…30 dB), in-distribution and on all six held-out OOD scenes
+  (42/42 cells). MMSE's fixed covariance breaks at high SNR; the σ²-conditioned gate does not.
+- **Sparse pilots:** a ReEsNet-capacity deep-fusion head fed the world-model prior wins the
+  sparse-pilot / mid-SNR band; a **learned SNR-band router** picks the better of {world model, CNN}
+  in **13/14** regimes (vs 9/14 for a hand rule), never worse than the best fixed estimator.
+- **Cross-config:** a **spatial-size-agnostic decoder** lets a model trained on **8×4** transfer
+  **zero-shot to 16×8** (128 spatial dims) at NMSE parity, beating LS/MMSE at every SNR (MMSE collapses).
+- **Baselines it beats in-band:** LS, linear interpolation, oracle-covariance MMSE, ReEsNet CNN, and a
+  conditional **DDPM diffusion** estimator (which is only high-SNR-robust and ~30× slower).
+
+**Prediction — competitive and unified, not dominant.**
+- A **deep (3-layer) selective SSM is statistically tied** with a matched-capacity Transformer at
+  channel prediction on both slow and fast mobility (3-seed means, gap ≪ seed std). A *single* SSM
+  layer trails ~6–8% — depth, not attention, closes the gap.
+- All learned models crush classical persistence / AR(1), by a margin that widens with horizon.
+- Honest caveats: the SSM is **less data-efficient** than attention (−9% at 6–12k sequences), and
+  predictors are **mobility-specific** (57–97% degradation transferring across speed regimes).
+
+**Downstream (predict-then-precode throughput).** Under CSI aging, prediction recovers up to ~24% of the
+aging-induced spectral-efficiency loss at fast mobility / long horizon / low-mid SNR; under slow mobility
+stale CSI is near-optimal and prediction is net counterproductive. A clean **crossover law**: a temporal
+prior helps only in a specific mobility × horizon × SNR × pilot-density regime.
+
+**The contribution is unification + characterization:** one ~7M-parameter model does estimation *and*
+prediction, each within a few percent of a task-specialized specialist, at the parameter cost of one —
+plus a precise map of *when* channel dynamics are worth their cost.
+
+## 3. Architecture
 
 ```
-observations o_t ─▶ context encoder ─▶ x_t ┐
-                                            ├─▶ [x_t ; a_t] ─▶ selective SSM ─▶ z_t ─▶ task heads
-actions a_t ─▶ SelectionNet ─▶ A_t,B_t,C_t,Δ_t ┘                              │      (reward/policy/…)
-                                                                              ▼
-planned actions (a_t … a_{t+k-1}) ─────────────────────▶ predictor ─▶ ẑ_{t+k}
-                                                                              │
-future obs o_{t+k} ─▶ target encoder (EMA, stop-grad) ─▶ z̃_{t+k}  ──▶  JEPA loss ‖ẑ_{t+k} − z̃_{t+k}‖
+o_t (noisy channel)  ──2-D DFT──▶  beam_t  ──BeamEncoder(conv)──▶  x_t
+                                                                    │
+                        a_t (motion action) ──SelectionNet──▶ (A,B,C,Δ)
+                                                                    ▼
+                                          x_t, a_t ──selective SSM──▶ (z_t, h_t)
+                                                                    │  roll k steps under planned actions
+                                                                    ▼
+                                   BeamDecoder ◀── predictor ──▶  b̂_{t+k}   [reconstruction loss]
+                                                                    │
+   estimate:  b̂_t (history prior) + noisy beam obs + clean t-1 persistence
+              ──learned Kalman gate──▶ beam_est_t ──inv DFT──▶  Ĥ_t        [channel loss]
 ```
 
-| Component | Role |
-| --------- | ---- |
-| **Context encoder** | `o_t → x_t`. Encodes the current channel into a latent (frozen LWM backbone + trainable head). |
-| **SelectionNet** | `a_t → (A_t, B_t, C_t, Δ_t)`. Makes the SSM *selective*: action-conditioned dynamics. |
-| **Selective SSM** | `[x_t; a_t] → z_t`. Diagonal Mamba-like recurrence; the temporal backbone. |
-| **Predictor** | `(z_t, planned actions) → ẑ_{t+k}`. Imagines the future latent. |
-| **Target encoder** | `o_{t+k} → z̃_{t+k}`. EMA copy of the context encoder; stop-gradient (collapse prevention). |
-| **Task heads** | `z_t → reward / policy / channel estimate`. Downstream readouts. |
-| **JEPA loss + EMA** | Trains everything in latent space; EMA + stop-grad prevent representation collapse. |
+- **Beamspace transform** (`implementation/wireless_data/beamspace.py`): orthonormal, invertible 2-D
+  DFT; a separable 3-D angle-angle-delay variant is available (`beam3d`, tested — does not help
+  estimation, kept for completeness).
+- **Selective SSM** (`selection_net/`, `selective_ssm/`): diagonal, ZOH-discretized, HiPPO/S4-style
+  init, action-conditioned params. A deep stacked variant lives in `task_heads/ssm_predictor.py`.
+- **Persistence-augmented fusion head**: the estimation gate sees {obs, learned prior, clean t-1
+  persistence} — a strict superset of every competitor, so it cannot lose to persistence by construction.
+- **Spatial-agnostic decoder**: latent broadcast over the grid + coordinate channels, so one model
+  decodes any (antenna, subcarrier) grid → cross-config transfer.
 
----
-
-## 3. Implementation status
-
-We build and validate the model **one module at a time**; each is independently strong and tested.
-**All 6 modules are complete**, plus the full JEPA integration and the real-data pipeline.
-
-| # | Module | Status | Tests |
-| - | ------ | ------ | ----- |
-| 1 | **ContextEncoder** | ✅ Done | 11 |
-| 2 | **TargetEncoder** | ✅ Done | 15 (6 unit + 9 coordination) |
-| 3 | **SelectionNet** | ✅ Done | 10 |
-| 4 | **SelectiveSSM** | ✅ Done | 8 |
-| 5 | **Predictor** | ✅ Done | 12 |
-| 6 | **TaskHeads** | ✅ Done | 10 |
-| — | **SSWM integration** (full JEPA step) | ✅ Done | 10 |
-| — | **WirelessDataset** (Sionna RT) | ✅ Done | 6 |
-
-**82 test cases pass on A100 GPUs** across all six modules + integration + dataset.
-
-Repository layout:
+## 4. Repository structure
 
 ```
 implementation/
-├── implementation.md          # detailed build plan & milestones
-├── config.py                  # SSWMConfig — shared dimensions/hyperparameters
-├── context_encoder/           # 1. o_t -> x_t   (frozen LWM + trainable head)
-├── target_encoder/            # 2. o_{t+k} -> z̃ (EMA, stop-grad)
-├── selection_net/             # 3. a_t -> A,B,C,Δ
-├── selective_ssm/             # 4. [x_t;a_t] -> z_t
-├── predictor/                 # 5. (pending)
-├── task_heads/                # 6. (pending)
-└── wireless_data/             # Sionna RT channel dataset
-scripts/                       # Greenland GPU auth/connect/sync + GPU validation
-docs/                          # architecture figure + assets
+  beam_wm/beam_world_model.py     # THE model: beamspace encode → selective SSM → predict → fuse/estimate
+  selection_net/ selective_ssm/   # action-conditioned SSM params + ZOH scan
+  context_encoder/ target_encoder/ predictor/   # legacy JEPA-era modules (superseded; kept for history)
+  wireless_data/                  # Sionna dataset loaders + beamspace transforms (2-D and 3-D)
+  task_heads/
+    baselines.py                  # LS, MMSE, linear interpolation
+    deep_baseline.py              # ReEsNet-style CNN + a-priori CSI router
+    ssm_predictor.py              # deep stacked selective-SSM predictor (matched-capacity)
+    temporal_baseline.py          # GRU / LSTM / Transformer predictors (matched-capacity)
+    diffusion_estimator.py        # conditional DDPM channel estimator
+    task_heads.py, unet_head.py   # estimation heads
+  config.py                       # SSWMConfig (dims, SSM hyperparams)
+  sswm.py, test_*.py              # full-model wiring + tests
+scripts/
+  gen_sionna_mimo.py, gen-mimo*.sh    # ray-traced MIMO data generation (8×4, 16×8, slow/fast)
+  train-beam-wm.py                     # world model: full-grid + prediction (--pred_only, --beam3d, --agnostic_decoder)
+  train-beam-sparse.py                 # sparse-pilot deep-fusion estimator
+  train-deep-baseline.py               # ReEsNet baseline
+  train-temporal-predictor.py          # GRU/LSTM/Transformer/deepssm predictors
+  train-diffusion-estimator.py         # DDPM estimator
+  gap-close-wave.sh sig-wave.sh arch-wave.sh temporal-wave.sh   # multi-GPU experiment launchers
+  throughput-aging.py spectral-efficiency.py   # predict-then-precode / SVD-precoding throughput
+  xconfig-eval.py xeval-predictor.py           # cross-config & cross-mobility generalization evals
+  greenland-*.sh                       # 8×A100 box: auth, SSM tunnel, rsync
+dashboard/                             # live HTTP training dashboard (Sionna 3D scene + loss curves)
+docs/paper.tex, paper.pdf              # the paper (all results below)
+results/                               # per-experiment NMSE / throughput JSONs
 ```
 
----
-
-## 4. The data: real ray-traced channels (Sionna RT)
-
-Every module is exercised on **real MIMO-OFDM channels generated by Sionna RT** (ray tracing) —
-no synthetic shortcuts. A transmitter is placed high near the scene centre and a receiver is moved
-along a sub-wavelength trajectory through a 3-D scene; the OFDM channel frequency response is
-computed per step, yielding **temporally-correlated channel sequences** `(T, 2, N_ant, N_sub)`
-(real/imag planes). This is the smooth evolution the world model is meant to predict.
-
-**Scale.** The large-scale dataset is **20,000 channel sequences** (each `T=8` steps) generated in
-parallel across **all 8 A100 GPUs** in ~25 min: 5,000 each from munich / etoile / florence and
-2,500 each from san_francisco / simple_street_canyon.
-
-**Scenes.** Data is generated across five built-in Sionna RT scenes for propagation diversity
-(receiver positions sampled within each scene's bounding box, dead-spot sequences with no paths
-rejected):
-
-| Scene | Type | Footprint (approx.) |
-| ----- | ---- | ------------------- |
-| `munich` | dense European city | ~1480 × 1200 m |
-| `etoile` | Paris Arc-de-Triomphe roundabout | ~850 × 680 m |
-| `florence` | dense historic city | ~1000 × 1100 m |
-| `san_francisco` | modern city grid | large urban |
-| `simple_street_canyon` | canonical 2-building canyon | ~190 × 120 m |
-
-Each scene is loaded with a `PlanarArray` BS (`N_ant` elements) and a single-antenna UE at 3.5 GHz;
-channels are computed with Sionna's `PathSolver` (max depth 3) and the OFDM `cfr`. Diversity across
-scenes is what gives the world model a non-trivial distribution to learn (a single scene is too
-self-similar — see §5).
-
-**Per-scene example channels** (`Re{H}`, antenna × subcarrier) — each scene has a distinct
-propagation signature:
-
-![Scene examples](docs/assets/scene_examples.png)
-
-**Receiver coverage** — RX trajectory start-points across each scene's footprint (20k sequences;
-dead-spot locations with no paths rejected):
-
-![Scene coverage](docs/assets/scene_coverage.png)
-
-**Distribution diversity (and why prediction is hard), over all 20k sequences.** The five scenes
-span a wide range of channel magnitudes — mean `|H|` ranges from ~7 (san_francisco) to ~108
-(street_canyon), a **~15× scale spread**:
-
-![Scene distributions](docs/assets/scene_distributions.png)
-
-**Temporal correlation.** Within a sequence the channel stays **0.69–0.96 cosine-similar** to its
-first frame — i.e. it evolves slowly:
-
-![Temporal correlation](docs/assets/scene_temporal_corr.png)
-
-These two facts directly shape the modeling problem (§5, Predictor): high temporal correlation
-makes **persistence** ("predict the present channel") a very strong baseline, while the large
-cross-scene scale spread is what a from-scratch predictor struggles to match.
-
-![Input channels](docs/assets/result_input_channels.png)
-
-*Example channels across regimes — clean single-path shows steering stripes; richer multipath and
-low-SNR look progressively noisier. This is `o_t` before encoding.*
-
-A key correctness detail: channels are scaled by `×1e6` to match LWM's training convention
-(`channel × 1e6` in DeepMIMO preprocessing), which **preserves the cross-antenna/subcarrier
-amplitude variation** LWM relies on. Per-sample max-normalization (our first attempt) destroyed
-that and made the frozen features ~32× less discriminative — see `wireless_data/README.md`.
-
----
-
-## 5. The modules we have built
-
-### Module 1 — ContextEncoder  (`o_t → x_t`)
-
-A backbone-agnostic encoder. The default backbone is **LWM (`wi-lab/lwm-v1.1`)**, a transformer
-**pretrained on DeepMIMO channels** (hidden dim 128) that ingests channel matrices directly — far
-more appropriate than a natural-image model. LWM is **frozen** (~2.5 M params); only a small
-projection head (~99 K params) is trained. (Alternatives `ijepa` and an offline `stub` are
-available for transfer/testing.)
-
-**What we did to verify it encodes real wireless structure:**
-
-![Parameter sweep](docs/assets/result_parameter_sweep.png)
-
-*Sweeping a single physical parameter (angle-of-departure, then delay) while holding everything
-else fixed: the frozen LWM features trace a **smooth, continuous manifold**. The encoder maps
-physically-nearby channels to nearby embeddings — the smooth latent the SSM needs.*
-
-![PCA of features](docs/assets/result_pca_features.png)
-
-*PCA of the embeddings colored by physical parameters: PC1 (72% variance) cleanly tracks SNR.
-Path-count and angle live in higher dimensions.*
-
-![Linear probe](docs/assets/result_linear_probe.png)
-
-*Linear-probe recovery of physical properties from frozen features (synthetic data baseline):
-SNR is strongly recoverable; this is the baseline we later beat with real data + a trained head.*
-
-**Making the head non-random (self-supervised pretraining).** The projection head starts random.
-A random linear projection already preserves LWM's (excellent) features on *clean* channels, but
-has no reason to be **noise-robust**. We pretrain the head with a **VICReg** objective whose
-positive pairs are two noise-augmented views of the same channel — i.e. enforce noise-invariance,
-the prior behind channel estimation. Data: **2048 Sionna sequences generated in parallel across
-all 8 A100s** (~1 min); train 4000 steps (head only, LWM frozen).
-
-![Pretraining loss](docs/assets/result_pretrain_loss.png)
-
-*VICReg pretraining: total loss 22.6 → 12.3; variance term drops and stabilizes (no collapse).*
-
-Linear-probe verification (6 location clusters):
-
-| Probe | Random head | Trained head |
-| ----- | ----------- | ------------ |
-| Clean location accuracy | 0.967 | 0.906 |
-| **Noise-robust (test @ 10 dB SNR)** | **0.517** | **0.911** |
-
-The trained head is dramatically more **noise-robust (+0.39 absolute)** — exactly what the
-objective targets — confirming it learned a task-useful, not random, representation.
-
-### Module 2 — TargetEncoder  (`o_{t+k} → z̃`, EMA + stop-grad)
-
-The target the predictor learns to match. It is a **deep copy of the context encoder** whose
-weights are an **exponential moving average** of the online encoder and which receives **no
-gradient** (stop-grad) — the standard JEPA/BYOL mechanism that prevents representation collapse.
-There is no separate model to download: in JEPA the target *is* a slow copy of the online encoder.
-EMA only tracks the trainable head (the frozen LWM is identical in both).
-
-![Coordination](docs/assets/result_coordination.png)
-
-*Context ↔ Target coordination (self-distillation on real channels, run on A100): the predictive
-loss decreases, the embedding std stays well above the collapse floor (**no collapse**), and the
-online/target EMA gap tracks the moving online network.*
-
-Rigorous review caught and fixed two real bugs here: (a) `train()` was re-enabling the frozen
-LWM's dropout (encoder became stochastic); (b) `trainable_parameters()` used `id()` that broke
-after `deepcopy`. Both fixed, with regression tests. 9 dedicated coordination tests verify
-stop-gradient isolation, EMA lag-then-track, anti-collapse, and momentum edge cases.
-
-### Module 3 — SelectionNet  (`a_t → A_t, B_t, C_t, Δ_t`)
-
-Generates the **input-dependent** parameters that make the SSM *selective* (Mamba-style). A small
-MLP trunk with four heads, using **Mamba/S4-style initialization**:
-
-- `A_t = −softplus(·)` — guaranteed negative (stable) continuous-time poles, for any action.
-- `Δ_t = softplus(·)` — positive step, initialized **log-uniform in `[dt_min, dt_max]`** (a spread
-  of timescales) via the inverse-softplus trick.
-- `A` bias targets `−1, −2, …, −state_dim` — a HiPPO-like spread of decay rates.
-
-Tests verify `A<0` and `Δ>0` everywhere, the init ranges, **selectivity** (different actions →
-different parameters), gradient flow, and numerical stability on extreme inputs.
-
-### Module 4 — SelectiveSSM  (`[x_t; a_t] → z_t`)
-
-The temporal backbone: a **diagonal, ZOH-discretized selective scan**.
-
-```
-Ā_t = exp(Δ_t · A_t)              # |Ā_t| < 1 because A_t < 0  → stable
-B̄_t = (Ā_t − 1)/A_t · B_t         # zero-order hold
-h_t = Ā_t ⊙ h_{t-1} + B̄_t ⊙ u_t   # u_t = Linear([x_t ; a_t])
-z_t = out_proj(LN(C_t ⊙ h_t + D ⊙ u_t))
-```
-
-Implemented as a sequential scan (correctness first). It exposes a `step()` method that reuses the
-*exact* recurrence, so the upcoming Predictor's rollout will match `forward` bit-for-bit. Tests
-verify: the scan **matches a hand-computed reference recurrence** (1e-6), `forward == step()`
-rollout (1e-5), stability over T=200, causality, and gradient flow into the SelectionNet. The full
-pipeline `o → x → z` is verified end-to-end.
-
----
-
-### Module 5 — Predictor  (`(z_t, planned actions) → ẑ_{t+k}`)
-
-The imagination step: roll the latent `k` steps into the future from `z_t` and **planned actions
-only**. Two mistakes we explicitly avoided: (1) **no information leak** — the future is unobserved,
-so the rollout is driven by actions, never by future observations (naively reusing the SSM's
-observation-driven `step()` would let the model cheat); (2) the output lives in **`embed_dim`**
-(the target-encoder space the JEPA loss compares against), not SSM-latent space — guarded by a
-test that makes the two dimensions unequal.
-
-The predictor predicts a **residual** on top of the present (`residual_prediction`, default on),
-with the output layer **zero-initialized** so it *starts exactly at persistence* and learns only the
-motion-driven correction.
-
-**Results — a real win, after fixing the formulation.** A naive first attempt (uninformative
-power-proxy action, sub-wavelength motion, prediction in LWM's noise-invariant embedding space) lost
-to persistence: the channel barely moved and there was nothing to condition on. We diagnosed it and
-fixed three things:
-
-1. **Velocity as the action** — the actual physical control driving channel evolution (not a power
-   proxy).
-2. **Larger inter-frame motion** (0.15 m/step ≈ λ) so the channel decorrelates enough to be worth
-   predicting.
-3. **Predict in raw channel space**, residual-on-present, with per-channel standardization (so the
-   ~15× cross-scene scale spread doesn't dominate the loss) and dropout.
-
-On a **12,000-sequence, 5-scene held-out** test, the predictor now **beats persistence**:
-
-| | predictor | persistence (echo present) | linear extrapolation |
-| --- | --------- | -------------------------- | -------------------- |
-| held-out NMSE | **0.315** | 0.420 | 1.260 |
-
-**1.33× better than persistence**, while linear extrapolation is far *worse* (1.26) — confirming the
-channel's motion is **nonlinear phase rotation** that only a learned, velocity-conditioned model
-captures. This is the evidence the world model learned genuine channel dynamics. (Repro:
-`scripts/gen_sionna_actions.py` + `scripts/train-raw-predictor.py`.)
-
-**These corrections flow through the full pipeline, at scale.** Feeding the same fixes (velocity
-actions + per-channel standardized inputs, via `wireless_data/ShardDataset`) into the complete
-`SSWM`, we ran **large-scale distributed training**: **60,000 Sionna sequences** (5 scenes, all 8
-A100s) → **DDP across all 8 GPUs** with a **LoRA-unfrozen LWM** backbone (rank-8 adapters on every
-attention layer, base weights frozen). Held-out (3k unseen sequences):
-
-| metric | predictor | persistence | batch-mean |
-| ------ | --------- | ----------- | ---------- |
-| **NMSE** (↓) | **0.0250** | 0.0358 | 0.0906 |
-| **cosine** (↑) | **0.9880** | 0.9834 | — |
-
-**1.43× better than persistence on NMSE** (and wins on cosine) — the strongest result across all
-runs, and the same SSWM that *lost* to persistence before the corrections. (Repro:
-`torchrun --nproc_per_node=8 scripts/train-ddp.py --data_dir data/act60k`. Training saturates by
-~2k steps; LWM frozen + LoRA = ~266K trainable params/GPU.)
-
-Earlier single-GPU scaled run (12k seqs, no LoRA) gave 1.15× — LoRA + more data lifted it to 1.43×.
-
-### Module 6 — TaskHeads  (`z_t → channel estimate / reward / policy`)
-
-Downstream probes on the world-model latent. The headline is **channel estimation**: recover the
-clean channel from a noisy observation, NMSE vs classical **LS** and **MMSE**.
-
-A naive `z → channel` probe failed (NMSE ~0.36 even at 20 dB). Diagnosis
-(`scripts/diag-channel-head.py`) showed why: the **frozen LWM latent is lossy/invariant** —
-reconstructing the channel from `z` gives 0.31 NMSE, but from the raw observation gives 0.005. LWM
-keeps *semantic* features, not an invertible copy of the channel. Fix: the channel head takes the
-latent **and** the raw observation, predicting a **residual on the observation** (zero-init → starts
-at LS). Result on 12k held-out Sionna sequences:
-
-| SNR | LS | MMSE | **SSWM** |
-| --- | ---- | ---- | ---- |
-| 0 dB  | 0.997 | 0.036 | **0.186** |
-| 10 dB | 0.100 | 0.008 | **0.114** |
-| 20 dB | 0.010 | 0.002 | **0.014** |
-
-**SSWM beats LS by up to ~5× at low SNR** and approaches MMSE — while, unlike MMSE, *not* being
-given the channel covariance or noise variance (it learns one estimator from data across all
-SNRs/scenes). MMSE remains the strongest baseline (it is the optimal linear estimator and these
-correlated channels are its ideal case). Honest framing: the learned world-model estimator is
-competitive with classical methods without their oracle statistics.
-
-### Integration — the full SSWM (`implementation/sswm.py`)
-
-All six modules are wired into one model that runs a complete JEPA step exactly as the figure:
-`o → context encoder → x → SelectiveSSM → z`; then `z_t` + planned actions → Predictor → `ẑ_{t+k}`,
-compared against `target_encoder(o_{t+k})`. The **SelectionNet is shared** between the SSM and the
-Predictor so the encode-path and imagination-path dynamics are consistent. 10 integration tests
-verify shared-parameter wiring, **stop-gradient isolation** (target gets no gradient), anchor
-bounds, loss decrease, and no-collapse over a training run.
-
-## 6. Large-scale end-to-end training (8× A100)
-
-With all 6 modules built, we trained the **whole network jointly** at scale on real ray-traced
-data.
-
-**Data — 100,000 Sionna sequences.** Generated in parallel across all 8 A100s
-(`scripts/gen_sionna_actions.py`): 5 city scenes, velocity actions `[vx, vy, speed, θ]` (the
-physical control driving channel evolution), 0.15 m/step trajectories, channels `×1e6`-scaled and
-per-channel standardized (`wireless_data/ShardDataset`).
-
-**Training — joint multi-task, DDP across 8 GPUs** (`scripts/train-e2e.py`, `torchrun
---nproc_per_node=8`). One optimizer trains everything end-to-end; the loss has **separate logged
-components**:
-
-```
-L_total = L_jepa            (world model: predictor matches EMA target of future channel)
-        + 0.05 · L_vicreg   (variance+covariance anti-collapse on the prediction)
-        + 5.0  · L_channel  (task: channel head denoises a noisy observation -> clean channel)
-```
-
-The LWM backbone is LoRA-unfrozen (rank-8 adapters on attention; base frozen). Per-module losses
-+ total + diagnostics are logged to JSON every 200 steps for the live dashboard.
-
-![Per-module losses (100k run)](docs/assets/e2e_losses.png)
-
-*Per-module losses from the actual 100k / 8× A100 run — each on its own scale. Total and channel
-losses fall sharply; VICReg holds the embedding variance up (anti-collapse); JEPA rises gently as
-the predictor learns directional structure.*
-
-**Results (100k, held-out 5,000 unseen sequences):**
-
-![Channel estimation vs LS/MMSE (100k)](docs/assets/e2e_channel_est.png)
-
-Channel estimation — NMSE vs SNR (lower better):
-
-| SNR | LS | MMSE | **SSWM** |
-| --- | ---- | ---- | ---- |
-| 0 dB  | 1.003 | 0.034 | 0.094 |
-| 5 dB  | 0.315 | 0.015 | **0.019** |
-| 10 dB | 0.100 | 0.0072 | **0.0062** |
-| 15 dB | 0.032 | 0.0039 | **0.0025** |
-| 20 dB | 0.010 | 0.0023 | **0.0012** |
-
-**SSWM beats the optimal MMSE estimator at 5/10/15/20 dB** (and beats LS everywhere), *without*
-being given MMSE's oracle channel covariance or noise variance — it learns one estimator from data
-across all SNRs and scenes. Scaling 12k → 100k nearly halved the hard 0 dB error (0.17 → 0.094).
-**World-model predictor:** 1.34× better than persistence. All losses converged cleanly, no collapse.
-
-Results + checkpoint are saved under `results/e2e_100k/`.
-
-## 7. Live HTTP dashboard
-
-A self-contained real-time dashboard (`dashboard/`, served by `dashboard/serve.py`) visualizes
-everything as it trains:
-
-![Dashboard — full view](docs/assets/dashboard.png)
-
-
-- **Real 3D scene geometry** — the actual Sionna building/street triangle meshes
-  (`scripts/export-scene-mesh.py` pulls the Mitsuba `vertex_positions_buffer` + `faces_buffer`),
-  rendered with Three.js, with the TX tower and RX trajectory cloud placed in the scene
-  (orbit / zoom / pan, switchable across all 5 scenes).
-- **Per-module loss curves** — Total, JEPA, VICReg, Channel each on its own graph (different
-  scales), plus channel NMSE vs LS on log scale, and an embedding-std collapse monitor.
-- **Channel statistics** — per-scene magnitude distributions, temporal correlation, per-antenna /
-  per-subcarrier energy, example channel heatmap.
-- **Channel estimation vs LS/MMSE** bars and the world-model predictor result, from the held-out eval.
+## 5. Results at a glance
+
+| Task / experiment | Result |
+|---|---|
+| Full-grid estimation vs MMSE | wins every SNR, in-dist + 42/42 OOD |
+| Sparse-pilot + learned router | 13/14 regimes correct; +2% over hand rule, never worse than best fixed |
+| Cross-config 8×4 → 16×8 (zero-shot) | NMSE parity, beats LS/MMSE every SNR |
+| Diffusion (DDPM) estimator | legit but loses to WM everywhere, 30× slower |
+| Prediction: deep-SSM vs Transformer | statistically tied, both mobilities (3 seeds) |
+| Prediction: single-layer SSM | trails 6–8% (depth is the enabler) |
+| Data-efficiency (SSM vs Transformer) | SSM −9% at 6–12k, ties at 24k |
+| Cross-mobility transfer | 57–97% degradation (both models) |
+| Predict-then-precode throughput | +≤24% aging recovery fast/long-k/low-SNR; net-negative slow |
+
+Raw numbers per experiment are in `results/` and written up in `docs/paper.tex`.
+
+## 6. Data — real ray-traced channels (Sionna RT)
+
+Sionna RT ray tracing at 3.5 GHz over six scenes (munich, etoile, florence, san_francisco,
+simple_street_canyon, simple_street_canyon_with_cars). Each sequence is a receiver walking a straight
+trajectory; the action is its velocity. Two mobility regimes: **slow** (≈λ step) and **fast** (≈5λ step).
+MIMO 8×4 = 32 folded spatial × 32 subcarriers; a 16×8 (128 spatial) set is generated for cross-config.
 
 ```bash
-# on the box: python dashboard/serve.py 8088
-# from laptop: SSM-forward 8088 -> local port, open http://localhost:<port>/
+bash scripts/gen-mimo.sh 3000        # slow, 8 scenes × 3000 = 24k sequences (8 GPUs)
+bash scripts/gen-mimo-fast.sh 3000   # fast mobility
 ```
 
-## 8. Where everything ran
-
-- **Local**: macOS, `wireless/` virtualenv, CPU correctness tests.
-- **GPU**: Amazon Greenland **p4d.24xlarge (8× A100-40GB)**, accessed via SSM tunnel (`scripts/`).
-  All modules run on CUDA; Sionna RT generates channels on the GPU; data generation and DDP
-  training fan across all 8 GPUs.
-
-Reproduce end to end:
+## 7. How to run
 
 ```bash
-./scripts/greenland-auth.sh          # interactive Midway auth (laptop)
-./scripts/greenland-connect.sh tunnel
-./scripts/greenland-sync.sh up
-ssh -p <port> greenland-user@localhost
-#   on the box:
-bash    scripts/gen-large-60k.sh 12500                       # ~100k Sionna seqs on 8 GPUs
-torchrun --nproc_per_node=8 scripts/train-e2e.py \           # full e2e DDP training
-         --data_dir data/act100k --steps 25000
-python  scripts/export-scene-mesh.py                         # real 3D scene meshes for dashboard
-python  dashboard/serve.py 8088                              # live dashboard
+# world model (full-grid estimation + prediction)
+torchrun --nproc_per_node=1 scripts/train-beam-wm.py --data_dir data/mimo --n_ant 32 --n_sub 32 --tag est
+# prediction-only (fair vs learned temporal baselines)
+torchrun ... scripts/train-beam-wm.py --data_dir data/mimo --pred_only --tag po_slow
+# matched-capacity predictors: GRU / LSTM / Transformer / deep selective-SSM
+torchrun ... scripts/train-temporal-predictor.py --data_dir data/mimo --backbone deepssm --n_layers 3 --tag ds3
+# sparse-pilot deep-fusion estimator + ReEsNet baseline
+torchrun ... scripts/train-beam-sparse.py --data_dir data/mimo --deep_fusion --stride 8 --tag sp8
+torchrun ... scripts/train-deep-baseline.py --data_dir data/mimo --stride 8 --tag deep8
+# downstream + generalization
+python scripts/throughput-aging.py  --wm_ckpt ... --tf_ckpt ... --ds_ckpt ... --data data/mimo_fast
+python scripts/xconfig-eval.py      --ckpt implementation/checkpoints/beam_est_agn.pt --data8 data/mimo --data16 data/mimo16x8
 ```
 
-## 9. Status & next steps
+Multi-GPU experiment waves (8× A100): `scripts/gap-close-wave.sh` (prediction), `scripts/arch-wave.sh`
+(estimation + 3-D + router inputs), `scripts/sig-wave.sh` (multi-seed).
 
-**All 6 modules complete and validated; full network trained end-to-end at 100k scale on 8 A100s.**
+## 8. Compute
 
-Possible next steps:
-- Push the hard **0 dB** regime (still trails MMSE) with more data / a denoising-specific head.
-- Fold the dashboard + checkpoints into a single inference entry point (pilot → channel estimate).
-- Explore unfreezing more of LWM / longer schedules now that the pipeline is proven.
+Runs on a Greenland EKS `p4d.24xlarge` (8× A100). `scripts/greenland-*.sh` handle Isengard auth, the SSM
+port-forward tunnel, and rsync. Data is regenerated on the box (Sionna RT is GPU-accelerated); only small
+result JSONs and checkpoints are pulled back.
 
-See `implementation/implementation.md` for the full milestone plan, and each module's `README.md`
-for component-level detail.
+## 9. Status
+
+All six modules built and validated; the paper (`docs/paper.tex`) compiles and reports every result
+above — positives and negatives. The estimation framework is never worse than the best baseline in any
+tested regime; the prediction claim is "deep selective-SSM competitive with attention, unified with
+estimation," with the crossover law delineating when a learned dynamics model is worth its cost.
