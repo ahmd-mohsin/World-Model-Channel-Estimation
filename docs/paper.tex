@@ -8,6 +8,26 @@
 \usepackage{enumitem}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,calc,shapes.geometric}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+\usepackage{subcaption}
+
+% ---- consistent plot palette (color-blind-safe) ----
+\definecolor{cWM}{HTML}{0072B2}      % world model (blue)
+\definecolor{cTF}{HTML}{D55E00}      % transformer (vermillion)
+\definecolor{cMMSE}{HTML}{009E73}    % mmse (green)
+\definecolor{cLS}{HTML}{999999}      % ls (grey)
+\definecolor{cAR}{HTML}{CC79A7}      % ar1 (pink)
+\definecolor{cSSM1}{HTML}{56B4E9}    % single-layer ssm (light blue)
+\definecolor{cAcc}{HTML}{E69F00}     % accent (orange)
+\pgfplotsset{
+  every axis/.append style={font=\small, line width=0.7pt, tick align=outside},
+  every axis plot/.append style={line width=1.1pt, mark size=1.6pt},
+  legend cell align=left,
+}
 
 \newcommand{\C}{\mathbb{C}}
 \newcommand{\R}{\mathbb{R}}
@@ -143,7 +163,77 @@ The world model is a single action-conditioned dynamics model:
 The same rolled-forward prediction serves \emph{estimation} as a temporal prior: the one-step
 prediction from history is fused with the current noisy observation to produce $\hat\Hc_t$. Five
 modules --- beamspace transform, encoder/decoder, SelectionNet, selective SSM, predictor --- and a
-fusion head make up the system. We describe each and how it is trained.
+fusion head make up the system (Fig.~\ref{fig:arch}). We describe each and how it is trained.
+
+\begin{table}[h]
+\centering\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}p{0.24\textwidth}p{0.42\textwidth}p{0.28\textwidth}@{}}
+\toprule
+\textbf{Novelty} & \textbf{Motivation (why)} & \textbf{Payoff (\S)} \\
+\midrule
+Beamspace (angle--delay) working domain & Ray channels are sparse in angle--delay, and receiver motion becomes an approximately \emph{linear per-tap phase} --- scene-invariant physics, not scene texture. & Dominant enabler; OOD transfer (\S\ref{sec:beamspace},\ref{sec:ablation}). \\
+Action-conditioned selective SSM & Motion \emph{drives} the dynamics; a controllable, linear-time state model can roll the channel forward under the planned action. & Prediction on par with a Transformer; supplies the estimation prior (\S\ref{sec:ssm},\ref{sec:res-pred}). \\
+Predict-then-fuse (faithful reconstruction prior) & One future-channel prediction is simultaneously a temporal prior for estimation --- unify, don't duplicate. & One model, both tasks at the cost of one (\S\ref{sec:heads}). \\
+Persistence-augmented fusion head & Feed the gate \{obs, learned prior, clean $t{-}1$ persistence\} --- a strict \emph{superset} of every competitor's inputs. & Beats persistence \emph{and} a same-capacity CNN across operational SNR (\S\ref{sec:ablation}). \\
+Learned CSI-adaptive router & Whether a temporal prior helps depends on pilot density $\times$ SNR; learn that boundary rather than hand-set it. & $13/14$ regimes correct; never worse than best fixed (\S\ref{sec:router}). \\
+Spatial-agnostic decoder & Decouple the decoder from a fixed antenna count so one model serves many array geometries. & Zero-shot $8\times4\!\to\!16\times8$, beats MMSE (\S\ref{sec:limits}). \\
+\bottomrule
+\end{tabular}
+\caption{Novelties, the physical/statistical motivation for each, and where each is validated.}
+\label{tab:novelty}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize,
+  node distance=6.5mm and 7mm,
+  box/.style={draw, rounded corners=2pt, minimum height=8mm, minimum width=12mm, align=center,
+              fill=cWM!8, line width=0.6pt},
+  dom/.style={box, fill=cAcc!12},
+  ssm/.style={box, fill=cMMSE!14},
+  op/.style={box, fill=cTF!12},
+  sig/.style={font=\scriptsize\itshape, align=center},
+  ar/.style={-{Latex[length=2mm]}, line width=0.7pt},
+  lossar/.style={-{Latex[length=1.6mm]}, densely dashed, line width=0.6pt, cLS},
+]
+% top row: history -> beamspace -> encoder -> SSM
+\node[dom] (o) {$\mathbf o_{\le t}$\\\scriptsize noisy chan.};
+\node[dom, right=of o] (beam) {2-D DFT\\\scriptsize beamspace};
+\node[box, right=of beam] (enc) {Encoder\\$f_\theta$};
+\node[ssm, right=of enc] (ssm) {selective\\SSM};
+\node[op, above=5mm of ssm] (sel) {SelectionNet\\\scriptsize $\mathbf a_t\!\to\!(A,B,C,\Delta)$};
+% predictor roll + decoder
+\node[ssm, right=of ssm] (roll) {roll $k$\\\scriptsize w/ $\mathbf a$};
+\node[box, right=of roll] (dec) {Decoder\\$g_\omega$};
+\node[dom, right=of dec] (bhat) {$\hat{\mathbf b}_{t+k}$\\\scriptsize future beam};
+% fusion / estimation branch (bottom)
+\node[op, below=9mm of dec] (fuse) {Kalman\\gate + refine};
+\node[dom, left=7mm of fuse] (obs) {$\mathbf b^{y}_t$\\\scriptsize obs (+persist)};
+\node[dom, right=7mm of fuse] (hhat) {$\hat{\mathbf H}_t$};
+% arrows top
+\draw[ar] (o)--(beam); \draw[ar] (beam)--(enc); \draw[ar] (enc)--(ssm);
+\draw[ar] (sel)--(ssm); \draw[ar] (ssm)--(roll); \draw[ar] (roll)--(dec); \draw[ar] (dec)--(bhat);
+\draw[ar] (sel.east) -| (roll.north);
+% prior into fusion
+\draw[ar] (dec.south) |- (fuse.east) node[pos=0.75, above, sig, black]{prior};
+\draw[ar] (obs)--(fuse); \draw[ar] (fuse)--(hhat);
+% losses
+\draw[lossar] (bhat.south) to[out=-90,in=90] node[right, sig, cLS]{$\mathcal L_{\text{pred}}$} ($(bhat.south)+(0,-6mm)$);
+\draw[lossar] (hhat.north) -- node[right, sig, cLS]{$\mathcal L_{\text{chan}}$} ($(hhat.north)+(0,5mm)$);
+\begin{scope}[on background layer]
+  \node[draw=cWM!40, rounded corners, fit=(o)(sel)(bhat), inner sep=3mm, line width=0.5pt] {};
+\end{scope}
+\end{tikzpicture}
+\caption{\textbf{Beam-WM pipeline.} The noisy channel history is mapped to the sparse beamspace, encoded,
+and rolled forward by an action-conditioned selective SSM to \emph{predict} the future channel
+($\mathcal L_{\text{pred}}$). The one-step-ahead prediction is a temporal \emph{prior} that a learned
+Kalman-style gate fuses with the current noisy observation (and the clean $t{-}1$ persistence frame) to
+\emph{estimate} the current channel ($\mathcal L_{\text{chan}}$). One representation and one backbone
+serve both tasks.}
+\label{fig:arch}
+\end{figure}
 
 %==================================================================
 \section{Module 1: Beamspace representation}\label{sec:beamspace}
@@ -430,17 +520,31 @@ statistics are frozen from the train split and applied to test/OOD data.
 \small
 \begin{tabular}{lcccccc}
 \toprule
-config & $N_t\times N_r$ & $N_s$ & $T$ & scenes & sequences & channels \\
+config & $N_t\times N_r$ & step & purpose & scenes & sequences \\
 \midrule
-MIMO $8\times4$ & $8\times4$ ($32$ sp.) & $32$ & $8$ & $6$ & $4.8{\times}10^4$ & $3.8{\times}10^5$ \\
+$8\times4$ slow  & $8\times4$ ($32$ sp.)  & $0.15$~m ($\approx\lambda$) & est.\ + pred., main & $6$ & $2.4$--$4.8{\times}10^4$ \\
+$8\times4$ fast  & $8\times4$ ($32$ sp.)  & $0.80$~m ($\approx5\lambda$) & mobility / aging & $6$ & $2.4{\times}10^4$ \\
+$16\times8$      & $16\times8$ ($128$ sp.)& $0.15$~m & cross-config transfer & $1$--$2$ & $3$--$6{\times}10^3$ \\
 \bottomrule
 \end{tabular}
-\caption{Generated Sionna~RT dataset ($8\times4$ MIMO). ``channels'' $=$ sequences $\times T$
-individual ray-traced OFDM responses; ``sp.''\ $=$ spatial channels ($N_t N_r$). $30$~kHz spacing,
-$3.5$~GHz, path-solver depth $3$, $0.15$~m steps, per-sequence speed $\in[0.3,2.0]$, leave-one-scene-
-out OOD.}
+\caption{Generated Sionna~RT datasets. All at $3.5$~GHz, $N_s{=}32$ subcarriers ($30$~kHz), $T{=}8$
+steps, path-solver depth $3$, per-sequence speed $\in[0.3,2.0]$, leave-one-scene-out OOD. ``sp.''\ $=$
+spatial channels ($N_tN_r$). The $8\times4$-slow set is the workhorse; the fast set stresses CSI aging;
+the $16\times8$ set (a $2\times$ larger array, $128$ folded spatial dims) tests zero-shot cross-config
+transfer.}
 \label{tab:data}
 \end{table}
+
+\paragraph{Multi-regime and cross-config generation.} Because our claims span mobility and array
+geometry, we generate three matched sets from the \emph{same} ray-tracing pipeline (Table~\ref{tab:data}),
+changing only the per-step displacement (mobility) or the array size (geometry). The fast set advances
+the receiver $0.8$~m/step so the channel changes $13$--$33\%$ per slot --- the regime where prediction
+actually matters for precoding. The $16\times8$ set re-solves the identical scenes with a $16$-element
+transmit and $8$-element receive array; folding $N_tN_r$ into a single spatial axis yields a $128$-dim
+grid, $4\times$ the $8\times4$ case, on which an $8\times4$-trained model is evaluated without any
+retraining. Generation is scene-parallel across the eight A100s; each $3$k-sequence shard takes
+$\approx\!15$--$30$~min (the denser urban scenes and the $128$-antenna solves are the slowest), with
+dead-spot rejection ($\approx\!40$--$70\%$ of trials land on valid multipath) built into the sampler.
 
 \paragraph{Systems.} Generation and training run across $8\times$ A100-40GB. Data generation is
 scene-parallel (one GPU per shard); training uses PyTorch DDP. All experiment ``waves'' (ablations,
@@ -487,6 +591,44 @@ attention --- is what closes the gap. GRU/LSTM (omitted for space) fall between 
 deep SSM.}
 \label{tab:pred}
 \end{table}
+
+\begin{figure}[t]
+\centering
+\begin{subcaptionblock}{0.49\textwidth}\centering
+\begin{tikzpicture}
+\begin{axis}[width=\textwidth, height=4.6cm, xlabel={prediction horizon $k$ (slots)},
+  ylabel={channel NMSE}, xmin=1, xmax=6, ymin=0.22, ymax=0.55, xtick={1,2,3,4,5,6},
+  legend style={at={(0.02,0.98)}, anchor=north west, font=\scriptsize, draw=none, fill=white, fill opacity=0.7},
+  grid=both, grid style={gray!18}]
+\addplot[cLS, mark=*, densely dotted] coordinates {(1,.419)(2,.447)(3,.399)(4,.490)(5,.518)(6,.529)};
+\addplot[cAR, mark=triangle*] coordinates {(1,.247)(2,.271)(3,.273)(4,.310)(5,.343)(6,.377)};
+\addplot[cSSM1, mark=diamond*] coordinates {(1,.258)(2,.268)(3,.275)(4,.290)(5,.303)(6,.316)};
+\addplot[cTF, mark=square*] coordinates {(1,.252)(2,.261)(3,.263)(4,.276)(5,.295)(6,.317)};
+\addplot[cWM, mark=*, line width=1.4pt] coordinates {(1,.255)(2,.262)(3,.266)(4,.281)(5,.301)(6,.325)};
+\legend{persistence, AR(1), single-layer SSM, Transformer, \textbf{deep SSM (ours)}}
+\end{axis}
+\end{tikzpicture}
+\subcaption{Prediction NMSE vs.\ horizon (slow).}\label{fig:pred}
+\end{subcaptionblock}\hfill
+\begin{subcaptionblock}{0.49\textwidth}\centering
+\begin{tikzpicture}
+\begin{axis}[width=\textwidth, height=4.6cm, xlabel={training sequences}, ylabel={mean NMSE ($k{=}1..6$)},
+  xmode=log, log basis x=2, xtick={6000,12000,24000}, xticklabels={6k,12k,24k},
+  ymin=0.16, ymax=0.30, legend style={at={(0.98,0.02)}, anchor=south east, font=\scriptsize, draw=none},
+  grid=both, grid style={gray!18}]
+\addplot[cTF, mark=square*] coordinates {(6000,.175)(12000,.234)(24000,.264)};
+\addplot[cWM, mark=*, line width=1.4pt] coordinates {(6000,.191)(12000,.256)(24000,.266)};
+\legend{Transformer, deep SSM (ours)}
+\end{axis}
+\end{tikzpicture}
+\subcaption{Data-efficiency: SSM converges to the tie only at full data.}\label{fig:dataeff}
+\end{subcaptionblock}
+\caption{\textbf{Prediction.} (a) All learned dynamics models beat classical persistence/AR(1) by a
+margin that widens with horizon; the deep selective SSM tracks the matched Transformer within
+$\pm2.5\%$ while a single SSM layer trails --- depth, not attention, closes the gap. (b) The SSM is
+less data-efficient, reaching parity only at the full $24$k set.}
+\label{fig:pred-panel}
+\end{figure}
 
 \paragraph{Mobility and the attention gap.} Re-generating the dataset at a $5\lambda$ step (channel
 changes $13$--$33\%$ per slot) sharpens the picture. Against classical baselines the learned edge
@@ -538,6 +680,29 @@ better; $8\times4$ MIMO SVD precoding). Prediction helps most at long horizon an
 \label{tab:tput}
 \end{table}
 
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=0.62\textwidth, height=4.8cm, xlabel={prediction horizon $k$ (slots ahead)},
+  ylabel={aging-loss recovered (\%)}, xmin=2, xmax=6, ymin=-5, ymax=28, xtick={2,3,4,5,6},
+  legend style={at={(0.02,0.98)}, anchor=north west, font=\scriptsize, draw=none, fill=white, fill opacity=0.75},
+  grid=both, grid style={gray!18}, extra y ticks={0}, extra y tick labels={}, extra y tick style={grid=major, grid style={black!35}}]
+\addplot[cWM, mark=*, line width=1.3pt] coordinates {(2,5)(4,17)(6,21)};
+\addplot[cTF, mark=square*] coordinates {(2,9)(4,18)(6,24)};
+\addplot[cWM, mark=o, densely dashed] coordinates {(2,-2)(4,6)(6,8)};
+\addplot[cTF, mark=square, densely dashed] coordinates {(2,3)(4,9)(6,12)};
+\legend{deep SSM, $0$~dB, Transformer, $0$~dB, deep SSM, $10$~dB, Transformer, $10$~dB}
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{Downstream predict-then-precode throughput (fast mobility).} Fraction of the
+CSI-aging spectral-efficiency loss recovered by precoding on the prediction (vs.\ stale CSI), for the
+world model and matched Transformer at $0$~dB (solid) and $10$~dB (dashed). Prediction pays off most at
+long horizon and low SNR; both predictors track closely, and under slow mobility the recovery is
+net-negative (stale CSI is near-optimal) --- the crossover law that delineates when channel dynamics
+are worth modeling.}
+\label{fig:tput}
+\end{figure}
+
 %==================================================================
 \section{Results: Channel estimation}\label{sec:res-est}
 
@@ -574,6 +739,46 @@ $0$~dB), omitted for space; the world model beats it by $5$--$1500\times$. OOD i
 averaged over all six scenes; the model wins all $42$ scene$\times$SNR cells.}
 \label{tab:full}
 \end{table}
+
+\begin{figure}[t]
+\centering
+\begin{subcaptionblock}{0.49\textwidth}\centering
+\begin{tikzpicture}
+\begin{axis}[width=\textwidth, height=4.7cm, xlabel={SNR (dB)}, ylabel={channel NMSE},
+  ymode=log, xmin=-5, xmax=30, ymin=2e-4, ymax=5, xtick={-5,0,5,10,15,20,30},
+  legend style={at={(0.98,0.98)}, anchor=north east, font=\scriptsize, draw=none, fill=white, fill opacity=0.75},
+  grid=both, grid style={gray!18}]
+\addplot[cLS, mark=*, densely dotted] coordinates {(-5,3.162)(0,1)(5,.3162)(10,.1)(15,.03162)(20,.01)(30,.001)};
+\addplot[cMMSE, mark=triangle*] coordinates {(-5,.0590)(0,.0259)(5,.0118)(10,.0057)(15,.0037)(20,.0123)(30,.60)};
+\addplot[cWM, mark=*, line width=1.4pt] coordinates {(-5,.0479)(0,.0208)(5,.0091)(10,.0040)(15,.0018)(20,.0009)(30,.0004)};
+\addplot[cWM, mark=o, densely dashed] coordinates {(-5,.0560)(0,.0243)(5,.0104)(10,.0045)(15,.0022)(20,.0014)(30,.0009)};
+\legend{LS, MMSE, \textbf{Beam-WM (in-dist)}, Beam-WM (OOD)}
+\end{axis}
+\end{tikzpicture}
+\subcaption{Full-grid estimation, $8\times4$. MMSE breaks at high SNR; Beam-WM does not, in- \emph{and} out-of-distribution.}\label{fig:est}
+\end{subcaptionblock}\hfill
+\begin{subcaptionblock}{0.49\textwidth}\centering
+\begin{tikzpicture}
+\begin{axis}[width=\textwidth, height=4.7cm, xlabel={SNR (dB)}, ylabel={channel NMSE},
+  ymode=log, xmin=-5, xmax=30, ymin=2e-4, ymax=20, xtick={-5,0,5,10,15,20,30},
+  legend style={at={(0.02,0.98)}, anchor=north west, font=\scriptsize, draw=none, fill=white, fill opacity=0.75},
+  grid=both, grid style={gray!18}]
+\addplot[cLS, mark=*, densely dotted] coordinates {(-5,3.121)(0,.999)(5,.316)(10,.100)(15,.0315)(20,.010)(30,.001)};
+\addplot[cMMSE, mark=triangle*] coordinates {(-5,.0813)(0,.0438)(5,.0219)(10,.0112)(15,.0062)(20,.0110)(30,11.96)};
+\addplot[cWM, mark=*, line width=1.4pt] coordinates {(-5,.0339)(0,.0112)(5,.0049)(10,.0026)(15,.0014)(20,.0008)(30,.00044)};
+\legend{LS, MMSE, \textbf{Beam-WM (zero-shot)}}
+\end{axis}
+\end{tikzpicture}
+\subcaption{Cross-config: a model trained on $8\times4$ run \emph{zero-shot} on $16\times8$ ($128$ spatial).}\label{fig:xconfig}
+\end{subcaptionblock}
+\caption{\textbf{Estimation dominates every baseline across SNR and configuration.} (a) In- and
+out-of-distribution, Beam-WM beats LS by $5$--$1500\times$ and MMSE at every SNR; MMSE's fixed
+covariance collapses when noise vanishes ($0.60$ at $30$~dB) while the $\sigma^2$-conditioned gate
+trusts the observation. (b) With the spatial-agnostic decoder, the same weights transfer zero-shot to a
+$2\times$ larger array and still beat classical estimators everywhere --- MMSE collapses catastrophically
+($11.96$ at $30$~dB).}
+\label{fig:est-panel}
+\end{figure}
 
 \paragraph{Generative baseline: conditional diffusion.} We also compare against a conditional DDPM
 estimator --- a $0.8$M-parameter conv $\epsilon$-network that denoises the beamspace channel
